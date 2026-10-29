@@ -6,7 +6,7 @@ import {
   haloWidgetLayoutHeight,
   measureHaloContentHeight,
   setHaloNodeSize,
-} from "./halo_resolution.8dff7e8fca32fa44.mjs";
+} from "./halo_resolution.996810c4debab720.mjs";
 
 const NODE_ID = "MATRIX_H3Resolution";
 export const LEGACY_NODE_ID = "MATRIX_H3Resolution_V06_MIGRATION_REQUIRED";

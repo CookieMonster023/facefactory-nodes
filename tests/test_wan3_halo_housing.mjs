@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HALO_TOKENS, haloWidgetLayoutHeight, mountHaloSurface } from "../web/halo.87ce22ea9cb20e75.mjs";
+import { HALO_TOKENS, haloWidgetLayoutHeight, mountHaloSurface } from "../web/halo.52ae2af62fca385b.mjs";
 
 test("WAN shared HALO tokens and widget-height API match runtime expectations", () => {
   assert.equal(HALO_TOKENS.green, "#00FF41");

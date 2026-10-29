@@ -4,7 +4,7 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 
-const source = (await readFile(new URL("../web/wan3.966d9792a941c4af.js", import.meta.url), "utf8"))
+const source = (await readFile(new URL("../web/wan3.246c99a87a83fe90.js", import.meta.url), "utf8"))
   .replace(/^import\s+\{\s*app\s*\}\s+from\s+["'][^"']+["'];\s*/m, "")
   .replace(/^import\s+\{\s*HALO_TOKENS,\s*haloWidgetLayoutHeight,\s*mountHaloSurface\s*\}\s+from\s+["'][^"']+["'];\s*/m, "");
 const legacyFixture = JSON.parse(await readFile(new URL("./fixtures/wan3/legacy-native-workflow.json", import.meta.url), "utf8"));

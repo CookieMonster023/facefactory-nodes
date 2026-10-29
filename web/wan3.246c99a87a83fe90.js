@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { HALO_TOKENS, haloWidgetLayoutHeight, mountHaloSurface } from "./halo.87ce22ea9cb20e75.mjs";
+import { HALO_TOKENS, haloWidgetLayoutHeight, mountHaloSurface } from "./halo.52ae2af62fca385b.mjs";
 
 const NODE = "MATRIX_Wan3";
 const BASE = "/matrix-wan3/credentials/v1";

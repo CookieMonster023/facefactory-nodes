@@ -6,7 +6,7 @@ import {
   haloWidgetLayoutHeight,
   measureHaloContentHeight,
   setHaloNodeSize,
-} from "./halo_resolution.8dff7e8fca32fa44.mjs";
+} from "./halo_resolution.996810c4debab720.mjs";
 
 const NODE_ID = "MATRIX_Flux3KleinResolution";
 export const CONTROL = Symbol.for("matrix.flux-3-klein-resolution.control-deck");
