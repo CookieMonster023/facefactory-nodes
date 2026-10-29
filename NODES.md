@@ -1,0 +1,54 @@
+# Node reference
+
+The 0.8.0 development pack registers 27 class IDs in seven `FACE FACTORY` groups: 23
+current nodes and four schema-compatible aliases. The installed `MANIFEST.json` is
+authoritative for a particular artifact.
+
+| Group | Status | Display name | Class ID | Inputs | Outputs | Guide |
+| --- | --- | --- | --- | --- | --- | --- |
+| Input & Output | Current | FACE FACTORY METADATA KILLER | `MATRIX_MetadataKiller` | `images`; save options | output node | [Guide](docs/nodes/metadata-killer.md) |
+| Input & Output | Current | FACE FACTORY IMAGE BATCH LOADER | `MATRIX_ImageBatchLoader` | `collection` | `images`, `masks` | [Guide](docs/nodes/image-batch-loader.md) |
+| Input & Output | Current | FACE FACTORY VIDEO METADATA KILLER | `MATRIX_VideoMetadataKiller` | native `video`; `filename_prefix` | cleaned saved `video` | [Guide](docs/nodes/video-metadata-killer.md) |
+| Resolution & Layout | Current | FACE FACTORY RESOLUTION | `MATRIX_Resolution` | ratio, tier, custom dimensions | `width`, `height` | [Guide](docs/nodes/resolution.md) |
+| Resolution & Layout | Current | FACE FACTORY AI INFLUENCER RESOLUTION | `MATRIX_AIInfluencerResolution` | ratio, tier | `width`, `height` | [Guide](docs/nodes/ai-influencer-resolution.md) |
+| Resolution & Layout | Current | FACE FACTORY AI INFLUENCER RESOLUTION 2K/4K | `MATRIX_AIInfluencerResolution2K4K` | ratio, 2K/4K tier | `width`, `height` | [Guide](docs/nodes/ai-influencer-resolution-2k4k.md) |
+| Resolution & Layout | Current | FACE FACTORY H3 RESOLUTION | `MATRIX_H3Resolution` | `aspect_ratio`, `resolution_tier`, `custom_width`, `custom_height` | `width`, `height` | [Guide](docs/nodes/h3-resolution.md) |
+| Resolution & Layout | Current | FACE FACTORY QWEN IMAGE 2.1 RESOLUTION | `MATRIX_QwenImage21Resolution` | `aspect_ratio` | `width`, `height` | [Guide](docs/nodes/qwen-image-21-resolution.md) |
+| Resolution & Layout | Current | FACE FACTORY FLUX 3 KLEIN RESOLUTION | `MATRIX_Flux3KleinResolution` | `aspect_ratio`, `resolution` | `width`, `height` | [Guide](docs/nodes/flux-3-klein-resolution.md) |
+| Sampling & Detail | Current | FACE FACTORY SPECTRAL SAMPLER | `MATRIX_SpectralSampler` | sampler and spectral controls | `sampler` | [Guide](docs/nodes/spectral-sampler.md) |
+| Sampling & Detail | Current | FACE FACTORY LATENT TAIL | `MATRIX_LatentTail` | model/noise/conditioning/latent; tail controls | `latent` | [Guide](docs/nodes/latent-tail.md) |
+| Sampling & Detail | Current | FACE FACTORY CROP TAIL PASTE | `MATRIX_CropTailPaste` | image/mask/model/noise/conditioning/VAE; crop controls | `image` | [Guide](docs/nodes/crop-tail-paste.md) |
+| Sampling & Detail | Current | FACE FACTORY KREA2 MODEL GUARD | `MATRIX_Krea2ModelGuard` | FP8 Krea 2 `model` before LoRAs | `MODEL` | [Guide](docs/krea2-gpu.md) |
+| Masks & Detection | Current | FACE FACTORY SKIN MASK | `MATRIX_SkinMask` | image; part and mask controls | `mask`, `preview` | [Guide](docs/nodes/skin-mask.md) |
+| Masks & Detection | Current | FACE FACTORY EYE MASK | `MATRIX_EyeMask` | image; detector and mask controls | `mask`, `masks`, `bboxes`, `preview` | [Guide](docs/nodes/eye-mask.md) |
+| Image Processing | Current | FACE FACTORY PHOTO FINISHER | `MATRIX_PhotoFinisher` | image; optional mask and finish controls | `image` | [Guide](docs/nodes/photo-finisher.md) |
+| Image Processing | Current | FACE FACTORY EASY CROP | `MATRIX_EasyCrop` | uploaded image and crop geometry | `image`, `mask` | [Guide](docs/nodes/easy-crop.md) |
+| Image Processing | Current | FACE FACTORY OUTPUT STAGE | `MATRIX_OutputStage` | image/model/noise/conditioning/VAE/target geometry; output controls | `image`, `info` | [Guide](docs/nodes/output-stage.md) |
+| Prompting | Current | FACE FACTORY AUTO PROMPTER | `MATRIX_AutoPrompter` | saved prompt fields; optional images | `prompt` | [Guide](docs/nodes/auto-prompter.md) |
+| Prompting | Current | FACE FACTORY KREA2 CLIP LOADER | `MATRIX_Krea2CLIPLoader` | Krea 2 Qwen3-VL 4B `clip_name` | `CLIP` | [Guide](docs/krea2-gpu.md) |
+| Prompting | Current | FACE FACTORY PROMPT | `MATRIX_Prompt` | multiline `prompt` | verbatim `prompt` | [Guide](docs/nodes/prompt.md) |
+| Video Generation | Current | FACE FACTORY WAN 3.0 | `MATRIX_Wan3` | operation-specific native media; generation, seed, credential, and billing controls | native `VIDEO` | [Guide](docs/nodes/wan3.md) |
+| Video Generation | Current | FACE FACTORY SCAIL WINDOW ENGINE | `MATRIX_SCAILWindow` | SCAIL model/conditioning/VAE, paired pose/reference images and masks, window and sampler controls | `images` | [Guide](docs/nodes/scail-window.md) |
+| Sampling & Detail | V1 alias | FACE FACTORY SPECTRAL SAMPLER | `MATRIXSpectralSampler` | same as `MATRIX_SpectralSampler` | `sampler` | [Migration](docs/migration.md) |
+| Resolution & Layout | V1 alias | FACE FACTORY AI INFLUENCER RESOLUTION 2K/4K | `MATRIXLAB_AIInfluencerResolution2K4K` | same as `MATRIX_AIInfluencerResolution2K4K` | `width`, `height` | [Migration](docs/migration.md) |
+| Input & Output | V1 alias | FACE FACTORY IMAGE BATCH LOADER | `MATRIXLAB_ImageBatchLoader` | same as `MATRIX_ImageBatchLoader` | `images`, `masks` | [Migration](docs/migration.md) |
+| Prompting | V1 alias | FACE FACTORY AUTO PROMPTER | `MATRIXLAB_PromptDirector` | same as `MATRIX_AutoPrompter` | `prompt` | [Migration](docs/migration.md) |
+
+`MATRIX_AIInfluencerResolution2K4K` does not replace the base AI Influencer Resolution class.
+Compatibility aliases preserve serialized V1 identities; new workflows should use the
+current class IDs. They do not represent additional implementations.
+
+The 0.4.0 baseline verification remains historical evidence. For H3, the four-widget controls and `width`/`height` connections were tested in
+Classic and Nodes 2.0 on frontend 1.53.6; other nodes retain their own compatibility boundaries.
+
+The Qwen Image 2.1 HALO controls, seven table selections, RESET, saved state, and
+queue path were verified locally in Classic and Nodes 2.0 with ComfyUI 0.37.0 and
+frontend 1.53.6. A Pod run is **NOT TESTED**. The Qwen Image 2.1 model uses the Qwen
+Research License for non-commercial use; this table node does not alter that license.
+
+The FLUX 3 Klein HALO controls, all 28 table selections, RESET, saved state, queue
+path, and a simulated graph were verified locally in Classic and Nodes 2.0 with
+ComfyUI 0.37.0 on 2026-10-15. A real FLUX 3 render and complete v2 Pod acceptance
+pass are **NOT TESTED**.
+
+SCAIL Window offline tests pass; renderer Nodes 2.0 acceptance of this unified build is not tested.

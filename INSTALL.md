@@ -1,0 +1,92 @@
+# Installation for people
+
+Install the exact authorized FACE FACTORY NODES package version 0.8.0.dev0 as one ComfyUI
+custom-node pack. Its `MANIFEST.json` must declare version `0.8.0.dev0` and the expected
+27 registered class IDs in seven category groups.
+
+## Before you begin
+
+- Use ComfyUI 0.37.0 or newer with frontend 1.53.6 or newer and Python 3.10 or newer.
+- The ComfyUI host must already provide PyAV (`av`). It is intentionally not an
+  installer dependency because replacing the host media stack is unsafe.
+- Back up important workflows and the current custom-node installation.
+- Close ComfyUI before changing custom nodes.
+- Check for the older `MATRIXLAB-Nodes` and `MATRIXLAB-UI-Nodes` split packs,
+  `matrix-krea2-adapter`, a standalone Metadata Killer, and a standalone
+  `MATRIX_Wan3` installation, a standalone `MATRIX_QwenImage21Resolution`, a standalone
+  `MATRIX_Flux3KleinResolution`, or either standalone `matrix-scail-window` or
+  `matrix-scail-window-flat` pack. They cannot remain
+  enabled beside this unified package because their registrations or frontend
+  targeting overlap.
+- Preserve every existing pack before changing it. Disable or replace a conflicting
+  folder through a recoverable process only with the user's authority.
+- Preserve the host's working Python, Torch, and CUDA versions.
+
+## Install from Git when repository access is available
+
+From the `custom_nodes` directory of the intended ComfyUI installation:
+
+```bash
+git clone https://github.com/CookieMonster023/facefactory-nodes.git facefactory-nodes
+cd facefactory-nodes
+```
+
+If GitHub requests access, authenticate through your normal Git credential flow.
+Do not put a token in the clone URL, command history, or repository files.
+
+Use the Python interpreter that launches this ComfyUI instance to install the declared dependencies. Review the command before running it if your environment manager might replace Torch:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+For portable or embedded ComfyUI, replace `python` with that installation's bundled interpreter and adjust the relative path.
+
+## Install from an archive
+
+Extract the release archive to a new folder named `facefactory-nodes` directly under the intended ComfyUI `custom_nodes` directory. The package root must contain `__init__.py`, `MANIFEST.json`, `requirements.txt`, `_core/`, `nodes/`, and `web/`. Avoid an extra archive wrapper directory.
+
+## Restart and verify
+
+1. Start ComfyUI through its normal launcher and inspect startup output for import errors.
+2. Open node search and find `FACE FACTORY RESOLUTION`, `FACE FACTORY QWEN IMAGE 2.1 RESOLUTION`,
+   `FACE FACTORY FLUX 3 KLEIN RESOLUTION`, `FACE FACTORY SCAIL WINDOW ENGINE`,
+   `FACE FACTORY PHOTO FINISHER`, and `FACE FACTORY AUTO PROMPTER`.
+3. Compare the installed classes with `MANIFEST.json`. Require version `0.8.0.dev0`, 27
+   unique registered class IDs, and seven `FACE FACTORY` category groups. The inventory
+   consists of 23 current nodes and four schema-compatible V1 aliases.
+4. Confirm all 27 IDs report the unified `facefactory-nodes` pack as their provider.
+   Stop if any ID or frontend asset still resolves to `matrix-krea2-adapter`, an
+   older split pack, the standalone Metadata Killer, `MATRIX_QwenImage21Resolution`,
+   `MATRIX_Flux3KleinResolution`, `matrix-scail-window`, or `matrix-scail-window-flat`.
+5. Open copies of an alias-ID workflow and a current-ID workflow. Confirm the green
+   FACE FACTORY controls appear for both IDs in each pair: Spectral Sampler, AI Influencer
+   Resolution 2K/4K, Image Batch Loader, and Auto Prompter. Do not save or rewrite
+   either workflow during this check.
+6. Add `MATRIX_Resolution`, select `3:4` and `2K`, and confirm outputs of 1536 by 2048 without queueing a model workflow.
+7. Add `MATRIX_QwenImage21Resolution`, confirm the default is `1:1`, and confirm
+   outputs of 2048 by 2048 without queueing a model workflow.
+8. Add `MATRIX_Flux3KleinResolution`, confirm the defaults are `1:1` and `1K`, and
+   confirm outputs of 1024 by 1024 without queueing a model workflow.
+9. Follow [docs/migration.md](docs/migration.md) if ComfyUI reports missing retired or incompatible classes.
+
+This verification proves discovery and the local geometry path only. It does not prove every model, detector, sampler, GPU, or frontend renderer.
+
+## External models and prompting
+
+Model weights are not bundled. Installing the pack does not acquire them, establish redistribution rights, or complete compatible inference-runtime setup. `MATRIX_SkinMask` and `MATRIX_EyeMask` fail when their registered assets or compatible runtimes are unavailable; do not bypass identity checks with a similarly named file. A successful package import is not proof that either mask node is ready to execute. Follow [the detector and segmentation setup guide](docs/detector-setup.md) for exact paths, hashes, source evidence, runtime boundaries, and unresolved license questions.
+
+`MATRIX_AutoPrompter` returns saved text during normal execution. Its explicit **Generate Prompt** control uses xAI and may incur charges. Configure credentials through its masked control or the documented server environment, never inside a workflow. Make the first provider call only after reviewing the selected model, reference images, request text, and cost boundary.
+
+Installation and compatibility checks must not alter provider keys or submit a paid
+request. Do not use **Generate Prompt** during installation verification.
+
+## Update
+
+Back up workflows, record the installed commit or archive hash, and read [CHANGELOG.md](CHANGELOG.md) plus [docs/migration.md](docs/migration.md). Stop ComfyUI before updating. Do not merge a new archive over an existing tree; install the new version into a clean staging folder, verify its structure, then replace the disabled old folder using your normal recoverable file-management process.
+
+After restart, repeat node discovery and test copies of important workflows. Keep the previous package available as a disabled rollback until those checks pass.
+
+## Uninstall
+
+Stop ComfyUI, back up any files you need, and remove or move the single `facefactory-nodes` folder through your normal recoverable process. Restart ComfyUI and confirm its classes are absent. Removing the pack does not remove provider account data, external model weights, ComfyUI input/output images, or saved workflows.

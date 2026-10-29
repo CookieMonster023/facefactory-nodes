@@ -1,0 +1,16 @@
+[project]
+name = "facefactory-nodes"
+version = "0.8.0.dev0"
+description = "FACE FACTORY custom nodes for ComfyUI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "The Face Factory" }]
+dependencies = ["Pillow", "aiohttp", "numpy", "scipy", "torch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "-p", "no:cacheprovider"]
+
+[project.urls]
+Repository = "https://github.com/CookieMonster023/facefactory-nodes"

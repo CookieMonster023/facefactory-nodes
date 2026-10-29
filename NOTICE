@@ -1,0 +1,32 @@
+FACE FACTORY NODES (facefactory-nodes)
+Modified fork maintained for The Face Factory course.
+
+This product is a modified version of MATRIX-LAB-Nodes by JsonMatrixLab
+(https://github.com/JsonMatrixLab/MATRIX-LAB-Nodes), licensed under the
+Apache License, Version 2.0 (see LICENSE, unchanged). "The Face Factory" is not
+affiliated with or endorsed by MATRIX LAB.
+
+Changes made in this fork (2026-10-29):
+- User-visible branding changed from "MATRIX LAB"/"MATRIX" to "FACE FACTORY":
+  node display names, node categories, UI labels, log names, docs, README,
+  install guides, example workflow notes, default filename prefix.
+- Package name/URLs changed to facefactory-nodes / github.com/CookieMonster023/facefactory-nodes.
+- Promotional links (YouTube channel) removed from the example workflow.
+- Internal node class IDs (e.g. MATRIX_MetadataKiller), migration aliases, HTTP
+  routes, headers and frontend storage keys are intentionally unchanged so
+  existing workflows keep loading.
+
+---- Original NOTICE from MATRIX-LAB-Nodes (retained per Apache-2.0 Section 4(d)) ----
+MATRIX LAB NODES
+Copyright 2026 MATRIX LAB
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Earlier tagged versions of this repository shipped with a proprietary LICENSE file;
+since 2026-09-29 those versions are also available under the Apache License, Version 2.0.
+
+The names "MATRIX LAB" and "MATRIX LAB NODES" and related logos are not licensed
+under the Apache License (see Section 6 of the license).
+
+Third-party components:
+- Cascadia Mono font (web/assets/), SIL Open Font License 1.1,
+  see web/assets/CascadiaMono-LICENSE.txt.

@@ -1,0 +1,2036 @@
+export const HALO_VERSION = "1.0.1";
+export const HALO_MOTION_SETTING_ID = "MATRIXLAB.HALO.Motion";
+
+export const HALO_GLYPHS =
+  "アカサタナハマヤラワイキシチニヒミリヰウクスツヌフムユルエケセテネヘメレヱオコソトノホモヨロヲ0123456789";
+
+export const HALO_EXECUTION_NODE_IDS = Object.freeze([
+  "MATRIX_SpectralSampler",
+  "MATRIXSpectralSampler",
+  "MATRIX_LatentTail",
+  "MATRIX_SkinMask",
+  "MATRIX_EyeMask",
+  "MATRIX_CropTailPaste",
+  "MATRIX_MetadataKiller",
+  "MATRIX_VideoMetadataKiller",
+  "MATRIX_OutputStage",
+  "MATRIX_PhotoFinisher",
+]);
+
+function numericStyle(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function measureHaloContentHeight(root, fallback = 0) {
+  if (!root) return Math.max(0, Number(fallback) || 0);
+  const children = Array.from(root.children || root.childNodes || []).filter((child) => {
+    const position = child?.style?.position;
+    return child?.tagName !== "CANVAS" && position !== "absolute" && position !== "fixed";
+  });
+  const bottoms = children
+    .map((child) => {
+      const top = Number(child.offsetTop);
+      const height = Number(child.offsetHeight);
+      return Number.isFinite(top) && Number.isFinite(height) && height > 0 ? top + height : 0;
+    })
+    .filter((bottom) => bottom > 0);
+  // A hidden/detached deck has no measurable flow. Its fallback is already
+  // a complete content height; adding padding again feeds the previous result
+  // back into the next observer pass and grows the node indefinitely.
+  if (!bottoms.length) return Math.max(0, Number(fallback) || 0);
+  const contentBottom = Math.max(...bottoms);
+  const view = root.ownerDocument?.defaultView || globalThis;
+  const style = view.getComputedStyle?.(root) || globalThis.getComputedStyle?.(root);
+  return Math.max(0, contentBottom + numericStyle(style?.paddingBottom) + numericStyle(style?.borderBottomWidth));
+}
+
+// ComfyUI owns the DOM-widget slot and may stretch it to the user's saved node
+// height. Keep that allocation separate from the intrinsic bordered surface so
+// native allocation never becomes the intrinsic content measurement.
+export function createHaloWidgetHost(surface, suppliedDocument) {
+  const doc = suppliedDocument || surface?.ownerDocument || globalThis.document;
+  if (!surface || !doc?.createElement) return null;
+  const host = doc.createElement("div");
+  host.className = "matrixlab-halo-host";
+  host.appendChild(surface);
+  return host;
+}
+
+// Renderer chrome is only learnable after the owned DOM root has a real layout.
+// Returning null for an unmounted/zero-sized root keeps the first probe from
+// permanently caching a false zero and lets the next resize pass learn it.
+export function measureHaloVerticalChrome(root, currentHeight, suppliedChrome) {
+  const ownedHeight = Number(root?.offsetHeight);
+  if (!(ownedHeight > 0)) return null;
+  const measured = Math.max(0, (Number(currentHeight) || 0) - ownedHeight);
+  const supplied = typeof suppliedChrome === "object"
+    ? Number(suppliedChrome?.vertical)
+    : Number(suppliedChrome);
+  return supplied > 0 && Number.isFinite(supplied) ? supplied : measured;
+}
+
+// The native minimum already includes widget margins, sockets and layout chrome.
+// Measuring against a stretched DOM root would mistake user surplus for chrome.
+export function haloMinimumNodeHeight(node, contentHeight, suppliedChrome = 0) {
+  try {
+    const minimum = Number(node.computeSize?.()?.[1]);
+    if (Number.isFinite(minimum) && minimum > 0) return minimum;
+  } catch {}
+  const chrome = typeof suppliedChrome === "object" ? Number(suppliedChrome?.vertical) : Number(suppliedChrome);
+  return Math.max(0, Number(contentHeight) || 0) + Math.max(0, chrome || 0);
+}
+
+const resizeInteractions = new WeakMap();
+const resizeDocuments = new WeakMap();
+
+// Nodes 2.0 ignores external size changes during a physical resize. Defer our
+// corrections until pointerup has completed, without touching renderer internals.
+export function bindHaloResizeInteraction(doc, node) {
+  if (!doc?.addEventListener) return () => {};
+  let state = resizeDocuments.get(doc);
+  if (!state) {
+    state = { active: false, pending: new Map(), owners: new Set(), timer: null };
+    state.down = () => { state.active = true; };
+    state.up = () => {
+      clearTimeout(state.timer);
+      state.timer = setTimeout(() => {
+        state.active = false;
+        const pending = [...state.pending];
+        state.pending.clear();
+        for (const [owner, repair] of pending) {
+          if (state.owners.has(owner) && owner.size?.[0] === repair.observed[0] && owner.size?.[1] === repair.observed[1]) {
+            setHaloNodeSize(owner, repair.size);
+          }
+        }
+      }, 0);
+    };
+    doc.addEventListener("pointerdown", state.down, true);
+    doc.addEventListener("pointerup", state.up, true);
+    doc.addEventListener("pointercancel", state.up, true);
+    doc.defaultView?.addEventListener?.("blur", state.up);
+    resizeDocuments.set(doc, state);
+  }
+  state.owners.add(node);
+  resizeInteractions.set(node, state);
+  return () => {
+    state.pending.delete(node);
+    state.owners.delete(node);
+    resizeInteractions.delete(node);
+    if (!state.owners.size) {
+      clearTimeout(state.timer);
+      doc.removeEventListener("pointerdown", state.down, true);
+      doc.removeEventListener("pointerup", state.up, true);
+      doc.removeEventListener("pointercancel", state.up, true);
+      doc.defaultView?.removeEventListener?.("blur", state.up);
+      resizeDocuments.delete(doc);
+    }
+  };
+}
+
+// Programmatic size repairs happen outside LiteGraph's pointer-resize dirty pass.
+// Keep the public size mutation and invalidate the owning canvas together so
+// Classic cached bounds and DOM-widget placement refresh on the next frame.
+export function setHaloNodeSize(node, size) {
+  if (!node || !size || size.length < 2) return size;
+  const interaction = resizeInteractions.get(node);
+  if (interaction?.active) {
+    interaction.pending.set(node, { size: [...size], observed: [...node.size] });
+    return size;
+  }
+  if (typeof node.setSize === "function") node.setSize(size);
+  else node.size = size;
+  node.setDirtyCanvas?.(true, true);
+  return size;
+}
+
+export function measureHaloHorizontalChrome(root, currentWidth, suppliedChrome) {
+  const ownedWidth = Number(root?.clientWidth || root?.offsetWidth);
+  if (!(ownedWidth > 0)) return null;
+  const view = root.ownerDocument?.defaultView || globalThis;
+  const style = view.getComputedStyle?.(root);
+  const padding = numericStyle(style?.paddingLeft) + numericStyle(style?.paddingRight);
+  const border = root.clientWidth ? 0
+    : numericStyle(style?.borderLeftWidth) + numericStyle(style?.borderRightWidth);
+  // A collapsed host can leave only the surface's padding measurable. That is
+  // not a laid-out widget slot and must not be cached as renderer chrome.
+  if (!(ownedWidth - padding - border > 0)) return null;
+  const measured = Math.max(0, (Number(currentWidth) || 0) - ownedWidth);
+  const supplied = typeof suppliedChrome === "object"
+    ? Number(suppliedChrome?.horizontal)
+    : Number(suppliedChrome);
+  return supplied > 0 && Number.isFinite(supplied) ? supplied : measured;
+}
+
+const DOM_WIDGET_DEFAULT_MARGIN = 10;
+const DOM_WIDGET_FIXED_ALLOCATION_EXTRA = 4;
+
+/**
+ * Convert owned DOM height into the height requested from ComfyUI's public
+ * DOM-widget bridge. Growable DOM widgets allocate the requested height and
+ * then remove both margins; fixed computeSize widgets receive an extra 4px
+ * before those margins are removed.
+ */
+export function haloWidgetLayoutHeight(contentHeight, widget, mode = "layout") {
+  const content = Math.max(0, Number(contentHeight) || 0);
+  const marginValue = Number(widget?.margin);
+  const margin = Number.isFinite(marginValue) && marginValue >= 0
+    ? marginValue
+    : DOM_WIDGET_DEFAULT_MARGIN;
+  const fixedAdjustment = mode === "fixed" ? -DOM_WIDGET_FIXED_ALLOCATION_EXTRA : 0;
+  return content + margin * 2 + fixedAdjustment;
+}
+
+export const HALO_TOKENS = Object.freeze({
+  body: "#050A05",
+  nativeTitle: "#0A150A",
+  staticBorder: "#21492B",
+  matrixText: "#39FF7A",
+  primaryText: "#EDF8F0",
+  secondaryText: "#97AA9C",
+  parameterLabel: "#ABC0B1",
+  committedValue: "#5CF2A5",
+  numericOutput: "#00FF41",
+  instanceId: "#7FB58B",
+  headerDivider: "#204B2B",
+  fieldBorder: "#31543C",
+  fieldHoverBorder: "#56FF82",
+  footerSurface: "#08170BDE",
+  footerDivider: "#24462E",
+  footerText: "#94C69E",
+  helpText: "#A3BAAA",
+  primaryActionText: "#BDFFD0",
+  primaryActionBorder: "#00FF41",
+  primaryActionHover: "#154624",
+  actionHighlight: "#BAFFCE24",
+  green: "#00FF41",
+  focus: "#FFCA6B",
+  warningText: "#FFCA6B",
+  warningSurface: "#241B0D",
+  errorText: "#FF6B5A",
+  errorSurface: "#26110F",
+  linkedText: "#97AA9C",
+  linkedSurface: "#0C1710",
+  linkedBorder: "#34513E",
+  successText: "#7DFA8A",
+  depthShadow: "#000000BB",
+  ambientShadow: "#00FF4117",
+  transparent: "#00000000",
+  ownedHeader: "linear-gradient(110deg, #112719EF 0%, #08150BEE 100%)",
+  parameterField: "linear-gradient(125deg, #172B1EDF 0%, #0B1710ED 100%)",
+  primaryAction: "linear-gradient(180deg, #173E24 0%, #0B2113 100%)",
+  shimmer: "linear-gradient(90deg, #AFFFC900 0%, #AFFFC940 50%, #AFFFC900 100%)",
+  outerRadius: 16,
+  outerBorderWidth: 1,
+  headerHeight: 49,
+  headerPaddingX: 16,
+  headerGap: 8,
+  footerHeight: 34.5,
+  footerPaddingX: 17,
+  footerPaddingY: 10,
+  deckMargin: 7,
+  deckPaddingX: 16,
+  deckPaddingY: 18,
+  fieldHeight: 38,
+  fieldPaddingX: 10,
+  fieldPaddingY: 8,
+  fieldRadius: 9,
+  fieldGap: 8,
+  fieldChildGap: 12,
+  sectionGap: 16,
+  primaryActionHeight: 40,
+  primaryActionRadius: 10,
+  secondaryActionMinHeight: 36,
+  secondaryActionRadius: 8,
+  executionMinWidth: 360,
+  uiMinWidth: 420,
+  zoomMotionCutoff: 0.45,
+  glyphCell: 16,
+  glyphFont: "bold 14px monospace",
+  glyphOffsetX: 2,
+  glyphOffsetY: 1,
+  columnPitch: 14,
+  trailLength: 8,
+  trailPitch: 14,
+  trailAlpha: 0.2,
+  trailAlphaStep: 0.025,
+  minSpeedPerSecond: 36,
+  maxSpeedPerSecond: 144,
+  maxTimeStepSeconds: 0.05,
+  wrapOvershoot: 20,
+  restartMinY: -40,
+  restartMaxY: 0,
+  edgeWidth: 1.8,
+  edgeShadowBlur: 10,
+  edgeDash: Object.freeze([24, 60]),
+  edgeDashCycle: 84,
+  edgeSpeed: 90,
+  canvasOverscan: 12,
+  maxDevicePixelRatio: 2,
+});
+
+export function applyHaloSelect(control) {
+  if (control?.tagName !== "SELECT") return control;
+  const classes = String(control.className || "").split(/\s+/).filter(Boolean);
+  if (!classes.includes("matrixlab-halo-select")) classes.push("matrixlab-halo-select");
+  control.className = classes.join(" ");
+  return control;
+}
+
+const FONT_URL = new URL("./assets/CascadiaMono.woff2", import.meta.url).href;
+const SCHEDULER_KEY = Symbol.for(`matrixlab.halo.scheduler.v${HALO_VERSION}`);
+const SURFACE_KEY = Symbol.for(`matrixlab.halo.surface.v${HALO_VERSION}`);
+const EXECUTION_KEY = Symbol.for(`matrixlab.halo.execution.v${HALO_VERSION}`);
+const STYLE_KEY = Symbol.for(`matrixlab.halo.style.v${HALO_VERSION}`);
+const SETTING_KEY = Symbol.for(`matrixlab.halo.motion-setting.v${HALO_VERSION}`);
+const MOTION_STORAGE_KEY = "matrixlab.halo.motion";
+const EXECUTION_IDS = new Set(HALO_EXECUTION_NODE_IDS);
+const UTILITY_IDS = new Set(["MATRIX_ResolutionPlan"]);
+
+function browserDocument(root, override) {
+  return override || root?.ownerDocument || globalThis.document;
+}
+
+function readMotionPreference(storage = globalThis.localStorage) {
+  try {
+    return storage?.getItem(MOTION_STORAGE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function roundedRect(ctx, x, y, width, height, radius) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(x, y, width, height, radius);
+    return;
+  }
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.arcTo(x + width, y, x + width, y + r, r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.arcTo(x + width, y + height, x + width - r, y + height, r);
+  ctx.lineTo(x + r, y + height);
+  ctx.arcTo(x, y + height, x, y + height - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+}
+
+function makeScheduler(options = {}) {
+  const win = options.window || globalThis;
+  const doc = options.document || win.document;
+  const requestFrame = options.requestAnimationFrame || win.requestAnimationFrame?.bind(win);
+  const cancelFrame = options.cancelAnimationFrame || win.cancelAnimationFrame?.bind(win);
+  const now = options.now || (() => win.performance?.now?.() ?? Date.now());
+  const clients = new Set();
+  let frameId = null;
+  let lastTime = null;
+  let motionEnabled = readMotionPreference(options.storage || win.localStorage);
+  let profile = null;
+
+  const profileSummary = (session) => {
+    const costs = session.samples.map((sample) => sample.costMs).sort((a, b) => a - b);
+    const percentile = (fraction) => costs.length
+      ? costs[Math.max(0, Math.ceil(costs.length * fraction) - 1)]
+      : null;
+    return Object.freeze({
+      frames: costs.length,
+      maxFrames: session.maxFrames,
+      complete: session.complete,
+      medianMs: percentile(0.5),
+      p95Ms: percentile(0.95),
+      maxMs: costs.length ? costs[costs.length - 1] : null,
+      eligibleCounts: Object.freeze(session.samples.map((sample) => sample.eligibleCount)),
+      measurementScope: "shared frame: eligibility, drawing and next-frame scheduling",
+    });
+  };
+
+  const eligibleClients = () => [...clients].filter((client) => client.isEligible());
+  const frame = (timestamp) => {
+    const measuredProfile = profile;
+    const profileStart = measuredProfile ? now() : 0;
+    frameId = null;
+    const current = Number.isFinite(timestamp) ? timestamp : now();
+    const elapsed = lastTime == null ? 0 : Math.min(0.05, Math.max(0, (current - lastTime) / 1000));
+    lastTime = current;
+    const eligible = motionEnabled ? eligibleClients() : [];
+    for (const client of eligible) client.drawFrame(current / 1000, elapsed);
+    if (eligible.length) schedule();
+    else lastTime = null;
+    if (measuredProfile) {
+      measuredProfile.samples.push({
+        costMs: Math.max(0, now() - profileStart),
+        eligibleCount: eligible.length,
+      });
+      if (measuredProfile.samples.length >= measuredProfile.maxFrames) {
+        measuredProfile.complete = true;
+        if (profile === measuredProfile) profile = null;
+      }
+    }
+  };
+  const schedule = () => {
+    if (frameId != null || !motionEnabled || !requestFrame || !eligibleClients().length) return;
+    frameId = requestFrame(frame);
+  };
+  const stop = () => {
+    if (frameId != null && cancelFrame) cancelFrame(frameId);
+    frameId = null;
+    lastTime = null;
+  };
+  const visibilityChanged = () => {
+    if (doc?.hidden) stop();
+    else schedule();
+  };
+  doc?.addEventListener?.("visibilitychange", visibilityChanged);
+  const wakeEvents = ["resize", "scroll", "wheel", "pointerup"];
+  for (const eventName of wakeEvents) win.addEventListener?.(eventName, schedule, { passive: true, capture: true });
+
+  return {
+    version: HALO_VERSION,
+    register(client) {
+      clients.add(client);
+      schedule();
+      return () => {
+        clients.delete(client);
+        if (!eligibleClients().length) stop();
+      };
+    },
+    wake: schedule,
+    stop,
+    setMotionEnabled(enabled, persist = true) {
+      motionEnabled = enabled !== false;
+      if (persist) {
+        try {
+          (options.storage || win.localStorage)?.setItem(MOTION_STORAGE_KEY, motionEnabled ? "on" : "off");
+        } catch {}
+      }
+      if (motionEnabled) schedule();
+      else stop();
+    },
+    isMotionEnabled: () => motionEnabled,
+    size: () => clients.size,
+    pending: () => frameId != null,
+    startProfile(maxFrames = 240) {
+      const boundedFrames = Math.min(240, Math.max(1, Math.trunc(Number(maxFrames) || 240)));
+      if (profile) profile.stopped = true;
+      const session = {
+        maxFrames: boundedFrames,
+        samples: [],
+        complete: false,
+        stopped: false,
+        summary() { return profileSummary(session); },
+        stop() {
+          session.stopped = true;
+          if (profile === session) profile = null;
+          return profileSummary(session);
+        },
+      };
+      profile = session;
+      schedule();
+      return session;
+    },
+    destroy() {
+      stop();
+      clients.clear();
+      doc?.removeEventListener?.("visibilitychange", visibilityChanged);
+      for (const eventName of wakeEvents) win.removeEventListener?.(eventName, schedule, { capture: true });
+    },
+  };
+}
+
+export function registerHaloMotionSetting(app, options = {}) {
+  const host = options.global || globalThis;
+  if (host[SETTING_KEY]) return host[SETTING_KEY];
+  const settings = app?.ui?.settings;
+  if (typeof settings?.addSetting !== "function") return null;
+  const scheduler = options.scheduler || getHaloScheduler(options.schedulerOptions);
+  const state = { id: HALO_MOTION_SETTING_ID, scheduler, definition: null };
+  host[SETTING_KEY] = state;
+  const definition = {
+    id: HALO_MOTION_SETTING_ID,
+    name: "FACE FACTORY HALO motion",
+    tooltip: "Animate FACE FACTORY HALO rain and perimeter effects.",
+    type: "boolean",
+    defaultValue: true,
+    onChange(value) {
+      scheduler.setMotionEnabled(value !== false, false);
+    },
+  };
+  state.definition = definition;
+  try {
+    settings.addSetting(definition);
+    const configured = settings.getSettingValue?.(HALO_MOTION_SETTING_ID);
+    if (typeof configured === "boolean") scheduler.setMotionEnabled(configured, false);
+  } catch (error) {
+    delete host[SETTING_KEY];
+    options.onError?.(error);
+    return null;
+  }
+  return state;
+}
+
+export function getHaloScheduler(options) {
+  const host = options?.global || globalThis;
+  const existing = host[SCHEDULER_KEY];
+  if (existing?.version === HALO_VERSION) return existing;
+  const scheduler = makeScheduler(options);
+  host[SCHEDULER_KEY] = scheduler;
+  return scheduler;
+}
+
+function installStyle(doc) {
+  if (!doc?.head?.appendChild || doc[STYLE_KEY]) return;
+  const style = doc.createElement("style");
+  style.dataset.matrixlabHalo = HALO_VERSION;
+  style.textContent = `
+@font-face{font-family:"MATRIXLAB HALO Mono";src:url("${FONT_URL}") format("woff2");font-style:normal;font-weight:400 700;font-display:swap}
+.matrixlab-halo{position:relative;isolation:isolate;box-sizing:border-box;overflow:visible;border:1px solid ${HALO_TOKENS.staticBorder};border-radius:16px;background:${HALO_TOKENS.body};box-shadow:0 18px 44px ${HALO_TOKENS.depthShadow},0 0 26px ${HALO_TOKENS.ambientShadow};color:${HALO_TOKENS.primaryText};font-family:"MATRIXLAB HALO Mono","Cascadia Mono","Cascadia Code",Consolas,"Liberation Mono",monospace;font-size:13px;line-height:19.5px;font-style:normal;font-variant-ligatures:none;font-variant-numeric:tabular-nums}
+.matrixlab-halo-host{position:relative;box-sizing:border-box;display:flex;width:100%;height:100%;min-width:0;min-height:0;flex-direction:column;align-items:stretch;justify-content:flex-start;overflow:visible}
+.matrixlab-halo-host>.matrixlab-halo{min-width:0;flex:0 0 auto}
+.matrixlab-halo.matrixlab-halo--unified{background:transparent;border-color:transparent;box-shadow:none}
+.matrixlab-halo-node-body{background-color:${HALO_TOKENS.body}!important;box-shadow:inset 0 0 0 1px ${HALO_TOKENS.staticBorder};overflow:visible}
+.matrixlab-halo-node-body>.flex:first-child{position:relative;z-index:3}
+.matrixlab-halo *{box-sizing:border-box;font-family:inherit;font-variant-ligatures:inherit;font-variant-numeric:inherit}
+.matrixlab-halo__rain,.matrixlab-halo__edge{position:absolute;display:block;pointer-events:none;user-select:none;aria-hidden:true}
+.matrixlab-halo__rain{z-index:1;inset:0;width:100%;height:100%;border-radius:15px;overflow:hidden}
+.matrixlab-halo__edge{z-index:5;inset:-12px;width:calc(100% + 24px);height:calc(100% + 24px)}
+.matrixlab-halo__content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:stretch;gap:8px;margin:0 7px;padding:18px 16px}
+.matrixlab-halo__field{position:relative;z-index:2;display:flex;min-width:0;flex-wrap:wrap;min-height:38px;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid ${HALO_TOKENS.fieldBorder};border-radius:9px;background:${HALO_TOKENS.parameterField};color:${HALO_TOKENS.parameterLabel};transition:background-color 150ms ease,border-color 150ms ease}
+.matrixlab-halo__saved-images button,.matrixlab-halo__saved-images a,.matrixlab-halo__saved-videos a{font-size:11px;padding:6px 8px;border:1px solid ${HALO_TOKENS.fieldBorder};border-radius:6px;background:${HALO_TOKENS.parameterField};color:${HALO_TOKENS.parameterLabel};text-decoration:none;cursor:pointer}
+.matrixlab-halo__saved-images button:disabled{opacity:.4;cursor:default}
+.matrixlab-halo__saved-images button:focus-visible,.matrixlab-halo__saved-images a:focus-visible,.matrixlab-halo__saved-videos a:focus-visible{outline:2px solid ${HALO_TOKENS.focus};outline-offset:2px}
+.matrixlab-halo__field:hover{border-color:${HALO_TOKENS.fieldHoverBorder}}
+.matrixlab-halo__field[data-linked="true"]{border-color:${HALO_TOKENS.linkedBorder};background:${HALO_TOKENS.linkedSurface};color:${HALO_TOKENS.linkedText}}
+.matrixlab-halo__field label{min-width:0;flex:1 1 108px;overflow-wrap:anywhere;font-size:11px;line-height:16.5px}
+.matrixlab-halo-select{appearance:auto;box-sizing:border-box;min-width:0;max-width:100%;border:1px solid ${HALO_TOKENS.fieldBorder};border-radius:6px;background:${HALO_TOKENS.linkedSurface};color:${HALO_TOKENS.primaryText};color-scheme:dark;accent-color:${HALO_TOKENS.green};direction:ltr;text-align:left;text-align-last:left}
+.matrixlab-halo-select option{background:${HALO_TOKENS.linkedSurface};color:${HALO_TOKENS.primaryText};direction:ltr;text-align:left}
+.matrixlab-halo__field input{box-sizing:border-box;min-width:0;width:108px;flex:0 1 108px;max-width:100%;min-height:24px;border:1px solid ${HALO_TOKENS.fieldBorder};border-radius:6px;background:${HALO_TOKENS.linkedSurface};color:${HALO_TOKENS.primaryText};text-align:right}
+.matrixlab-halo__field textarea{box-sizing:border-box;display:block;min-width:0;width:100%;min-height:128px;flex:1 1 128px;resize:none;border:1px solid ${HALO_TOKENS.fieldBorder};border-radius:6px;padding:10px;background:${HALO_TOKENS.linkedSurface};color:${HALO_TOKENS.primaryText};line-height:19.5px;text-align:left;white-space:pre-wrap}
+.matrixlab-halo__field--prompt{flex:1 1 180px;min-height:180px;align-items:stretch;flex-direction:column;flex-wrap:nowrap}
+.matrixlab-halo__field--prompt label{flex:0 0 auto}
+.matrixlab-halo__field .matrixlab-halo-select{width:152px;flex:0 1 152px;min-height:24px}
+.matrixlab-halo__field input[type="checkbox"]{width:18px;flex:0 0 18px}
+.matrixlab-halo__field input:focus-visible,.matrixlab-halo__field textarea:focus-visible,.matrixlab-halo-select:focus-visible,.matrixlab-halo__field button:focus-visible{outline:2px solid ${HALO_TOKENS.focus};outline-offset:4px}
+.matrixlab-halo__field input:disabled,.matrixlab-halo__field textarea:disabled,.matrixlab-halo-select:disabled{color:${HALO_TOKENS.linkedText};opacity:1}
+.matrixlab-halo__linked{font-size:9px;line-height:13.5px;letter-spacing:1px;color:${HALO_TOKENS.linkedText}}
+.matrixlab-halo [data-halo-effect]{position:relative;overflow:hidden}
+.matrixlab-halo [data-halo-effect="primary"]:active:not(:disabled){transform:translateY(1px)}
+.matrixlab-halo__ripple,.matrixlab-halo__shimmer{position:absolute;pointer-events:none;user-select:none}
+.matrixlab-halo__ripple{z-index:0;width:12px;height:12px;border-radius:50%;background:#ABFFCB66;transform:translate(-50%,-50%)}
+.matrixlab-halo__shimmer{z-index:0;inset:-50%;background:${HALO_TOKENS.shimmer};transform:translateX(-80%) rotate(25deg)}
+`;
+  doc.head.appendChild(style);
+  doc[STYLE_KEY] = style;
+}
+
+let atlas = null;
+function glyphAtlas(doc) {
+  if (atlas) return atlas;
+  const canvas = doc.createElement("canvas");
+  canvas.width = HALO_GLYPHS.length * HALO_TOKENS.glyphCell;
+  canvas.height = HALO_TOKENS.glyphCell;
+  const ctx = canvas.getContext("2d");
+  ctx.font = HALO_TOKENS.glyphFont;
+  ctx.textBaseline = "top";
+  ctx.fillStyle = HALO_TOKENS.green;
+  for (let index = 0; index < HALO_GLYPHS.length; index += 1) {
+    ctx.fillText(HALO_GLYPHS[index], index * HALO_TOKENS.glyphCell + HALO_TOKENS.glyphOffsetX, HALO_TOKENS.glyphOffsetY);
+  }
+  return (atlas = { canvas, cell: HALO_TOKENS.glyphCell });
+}
+
+function logicalSize(root) {
+  const width = Number(root.offsetWidth) || Number(root.clientWidth);
+  const height = Number(root.offsetHeight) || Number(root.clientHeight);
+  if (width > 0 && height > 0) return { width, height };
+  const rect = root.getBoundingClientRect?.();
+  return {
+    width: Math.max(1, width || Number(rect?.width) || 1),
+    height: Math.max(1, height || Number(rect?.height) || 1),
+  };
+}
+
+function resizeCanvas(canvas, cssWidth, cssHeight, dpr) {
+  const width = Math.max(1, Math.round(cssWidth * dpr));
+  const height = Math.max(1, Math.round(cssHeight * dpr));
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
+}
+
+function defaultVisible(root, doc) {
+  if (root.isConnected === false || root.hidden || doc?.hidden) return false;
+  const rect = root.getBoundingClientRect?.();
+  if (!rect) return true;
+  const view = doc?.defaultView || globalThis;
+  const width = Number(view.innerWidth) || Number(doc?.documentElement?.clientWidth) || Infinity;
+  const height = Number(view.innerHeight) || Number(doc?.documentElement?.clientHeight) || Infinity;
+  return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.left < width && rect.top < height;
+}
+
+function installInteractionEffects(root, isEligible) {
+  const active = new Map();
+  const listeners = [];
+  const add = (name, listener, options) => {
+    root.addEventListener?.(name, listener, options);
+    listeners.push([name, listener, options]);
+  };
+  const contains = (ancestor, item) => {
+    for (let cursor = item; cursor; cursor = cursor.parentElement || cursor.parentNode) {
+      if (cursor === ancestor) return true;
+      if (cursor === root) break;
+    }
+    return false;
+  };
+  const effectButton = (target) => {
+    for (let cursor = target; cursor; cursor = cursor.parentElement || cursor.parentNode) {
+      if (cursor?.dataset?.haloEffect) return cursor;
+      if (cursor === root) break;
+    }
+    return null;
+  };
+  const stateFor = (button) => {
+    if (!active.has(button)) active.set(button, { pointer: false, focus: false, ripple: null, shimmer: null });
+    return active.get(button);
+  };
+  const removeEffect = (state, name) => {
+    const effect = state[name];
+    if (!effect) return;
+    effect.animation?.cancel?.();
+    effect.element?.remove?.();
+    state[name] = null;
+  };
+  const permitted = (button) => Boolean(button && !button.disabled && button.getAttribute?.("aria-disabled") !== "true" && isEligible());
+  const animate = (element, frames, timing) => typeof element.animate === "function"
+    ? element.animate(frames, timing)
+    : null;
+
+  const ripple = (button, event) => {
+    if (!permitted(button)) return;
+    const state = stateFor(button);
+    removeEffect(state, "ripple");
+    const rect = button.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+    const keyboard = event?.detail === 0 || !Number.isFinite(event?.clientX) || !Number.isFinite(event?.clientY);
+    const logical = logicalSize(button);
+    const scaleX = logical.width / (Number(rect.width) || logical.width);
+    const scaleY = logical.height / (Number(rect.height) || logical.height);
+    const x = keyboard ? logical.width / 2 : (Number(event.clientX) - Number(rect.left)) * scaleX;
+    const y = keyboard ? logical.height / 2 : (Number(event.clientY) - Number(rect.top)) * scaleY;
+    const element = root.ownerDocument?.createElement?.("span") || globalThis.document?.createElement?.("span");
+    if (!element) return;
+    element.className = "matrixlab-halo__ripple";
+    element.setAttribute?.("aria-hidden", "true");
+    element.style.left = `${x}px`;
+    element.style.top = `${y}px`;
+    button.appendChild?.(element);
+    const animation = animate(element, [
+      { width: "12px", height: "12px", opacity: 1 },
+      { width: "170px", height: "170px", opacity: 0 },
+    ], { duration: 450, easing: "ease-out", fill: "forwards" });
+    state.ripple = { element, animation };
+    if (animation) animation.onfinish = () => {
+      if (state.ripple?.element === element) state.ripple = null;
+      element.remove?.();
+    };
+    else { element.remove?.(); state.ripple = null; }
+  };
+
+  const shimmer = (button) => {
+    if (!permitted(button) || button.dataset.haloEffect !== "primary") return;
+    const state = stateFor(button);
+    removeEffect(state, "shimmer");
+    const element = root.ownerDocument?.createElement?.("span") || globalThis.document?.createElement?.("span");
+    if (!element) return;
+    element.className = "matrixlab-halo__shimmer";
+    element.setAttribute?.("aria-hidden", "true");
+    button.appendChild?.(element);
+    const animation = animate(element, [
+      { transform: "translateX(-80%) rotate(25deg)" },
+      { transform: "translateX(80%) rotate(25deg)" },
+    ], { duration: 600, easing: "ease-out", fill: "forwards" });
+    state.shimmer = { element, animation };
+    if (animation) animation.onfinish = () => {
+      if (state.shimmer?.element === element) state.shimmer = null;
+      element.remove?.();
+    };
+    else { element.remove?.(); state.shimmer = null; }
+  };
+
+  add("click", (event) => ripple(effectButton(event.target), event), true);
+  add("pointerover", (event) => {
+    const button = effectButton(event.target);
+    if (!button || contains(button, event.relatedTarget)) return;
+    const state = stateFor(button);
+    const wasEntered = state.pointer || state.focus;
+    state.pointer = true;
+    if (!wasEntered) shimmer(button);
+  });
+  add("pointerout", (event) => {
+    const button = effectButton(event.target);
+    if (!button || contains(button, event.relatedTarget)) return;
+    stateFor(button).pointer = false;
+  });
+  add("focusin", (event) => {
+    const button = effectButton(event.target);
+    if (!button) return;
+    const state = stateFor(button);
+    const wasEntered = state.pointer || state.focus;
+    state.focus = true;
+    if (!wasEntered) shimmer(button);
+  });
+  add("focusout", (event) => {
+    const button = effectButton(event.target);
+    if (!button || contains(button, event.relatedTarget)) return;
+    stateFor(button).focus = false;
+  });
+
+  return () => {
+    for (const [name, listener, options] of listeners) root.removeEventListener?.(name, listener, options);
+    for (const state of active.values()) {
+      removeEffect(state, "ripple");
+      removeEffect(state, "shimmer");
+    }
+    active.clear();
+  };
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+/**
+ * Temporarily hide the owned DOM widget while native ghost placement owns the
+ * pointer. Classic keeps a separate same-sized DOM overlay, so making the
+ * surface itself pointer-transparent is not sufficient.
+ */
+export function bindHaloGhostPlacement(root, node, canvas) {
+  if (!root || !node || !canvas?.addEventListener) return () => {};
+
+  let snapshot = null;
+
+  const findPresentation = () =>
+    (node.widgets || []).find((widget) => {
+      const element = widget?.element;
+      return element === root || element?.contains?.(root);
+    }) || null;
+
+  const restore = () => {
+    if (!snapshot) return;
+    const { widget, hadHidden, hidden, options, hadOptions, hadOptionHidden, optionHidden } = snapshot;
+    if (hadHidden) widget.hidden = hidden;
+    else delete widget.hidden;
+    if (hadOptionHidden) options.hidden = optionHidden;
+    else delete options.hidden;
+    if (!hadOptions) delete widget.options;
+    snapshot = null;
+    node.setDirtyCanvas?.(true, true);
+  };
+
+  const setHidden = (active) => {
+    if (!active) {
+      restore();
+      return;
+    }
+    const widget = findPresentation();
+    if (!widget || snapshot?.widget === widget) return;
+    restore();
+    const hadHidden = hasOwn(widget, "hidden");
+    const hidden = widget.hidden;
+    const hadOptions = hasOwn(widget, "options");
+    const options = widget.options || (widget.options = {});
+    const hadOptionHidden = hasOwn(options, "hidden");
+    const optionHidden = options.hidden;
+    snapshot = { widget, hadHidden, hidden, hadOptions, options, hadOptionHidden, optionHidden };
+    widget.hidden = true;
+    options.hidden = true;
+    node.setDirtyCanvas?.(true, true);
+  };
+
+  const onGhostPlacement = (event) => {
+    const detail = event?.detail;
+    if (!detail || String(detail.nodeId) !== String(node.id)) return;
+    setHidden(detail.active === true);
+  };
+
+  canvas.addEventListener("litegraph:ghost-placement", onGhostPlacement);
+  if (node.flags?.ghost) setHidden(true);
+
+  return () => {
+    canvas.removeEventListener?.("litegraph:ghost-placement", onGhostPlacement);
+    restore();
+  };
+}
+
+// Decoration spans the native socket body without participating in widget layout.
+// The Vue selectors below are feature-detected integration points, not public APIs.
+export function bindHaloNodeHousing(root, node, app, rainCanvas) {
+  let body = null;
+  const previous = node.onDrawBackground;
+  const draw = function (ctx) {
+    ctx.save();
+    try {
+      if (!this.flags?.collapsed) {
+        ctx.beginPath();
+        roundedRect(ctx, 0, 0, this.size[0], this.size[1], HALO_TOKENS.outerRadius);
+        ctx.fillStyle = HALO_TOKENS.body;
+        ctx.fill();
+        // Classic sockets are painted after this hook. Composite rain here so
+        // the native labels and connection dots stay above the decoration.
+        if (app?.ui?.settings?.getSettingValue?.("Comfy.VueNodes.Enabled") !== true && rainCanvas?.width > 0 && rainCanvas?.height > 0) {
+          ctx.save();
+          ctx.clip();
+          ctx.drawImage(rainCanvas, 0, 0, this.size[0], this.size[1]);
+          ctx.restore();
+        }
+        ctx.strokeStyle = HALO_TOKENS.staticBorder;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      return previous?.apply(this, arguments);
+    } finally { ctx.restore(); }
+  };
+  node.onDrawBackground = draw;
+  function clearBody() {
+    body?.classList?.remove("matrixlab-halo-node-body");
+    body = null;
+  }
+  return {
+    bounds() {
+      const rect = root.getBoundingClientRect?.();
+      let housing;
+      const vue = app?.ui?.settings?.getSettingValue?.("Comfy.VueNodes.Enabled") === true;
+      if (vue) {
+        const outer = root.closest?.("[data-node-id]");
+        const candidate = outer?.querySelector?.(`[data-testid="node-body-${node.id}"]`);
+        if (body !== candidate) { clearBody(); body = candidate; }
+        body?.classList?.add("matrixlab-halo-node-body");
+        housing = body?.getBoundingClientRect?.();
+      } else {
+        clearBody();
+        const canvas = app?.canvas;
+        const viewport = canvas?.canvas?.getBoundingClientRect?.();
+        const scale = Number(canvas?.ds?.scale);
+        const offset = canvas?.ds?.offset;
+        if (viewport && offset && scale > 0) housing = {
+          left: viewport.left + (node.pos[0] + offset[0]) * scale,
+          top: viewport.top + (node.pos[1] + offset[1]) * scale,
+          width: node.size[0] * scale, height: node.size[1] * scale,
+        };
+      }
+      const scale = rect?.width / root.offsetWidth;
+      const valid = rect?.width > 0 && housing?.width > 0 && housing?.height > 0 && scale > 0 && !node.flags?.collapsed;
+      if (valid) root.classList?.add("matrixlab-halo--unified");
+      else root.classList?.remove("matrixlab-halo--unified");
+      if (!valid) return null;
+      return { left: (housing.left - rect.left) / scale, top: (housing.top - rect.top) / scale,
+        width: housing.width / scale, height: housing.height / scale };
+    },
+    destroy() {
+      clearBody();
+      root.classList?.remove("matrixlab-halo--unified");
+      if (node.onDrawBackground === draw) node.onDrawBackground = previous;
+      node.setDirtyCanvas?.(true, true);
+    },
+  };
+}
+
+export function mountHaloSurface(root, node, options = {}) {
+  if (!root || typeof root.appendChild !== "function") return null;
+  if (root[SURFACE_KEY]) return root[SURFACE_KEY];
+  const doc = browserDocument(root, options.document);
+  if (!doc?.createElement) return null;
+  installStyle(doc);
+  const profile = options.profile === "execution" ? "execution" : "ui";
+  const rainCanvas = doc.createElement("canvas");
+  const edgeCanvas = doc.createElement("canvas");
+  rainCanvas.className = "matrixlab-halo__rain";
+  edgeCanvas.className = "matrixlab-halo__edge";
+  rainCanvas.setAttribute?.("aria-hidden", "true");
+  edgeCanvas.setAttribute?.("aria-hidden", "true");
+  root.classList?.add("matrixlab-halo", `matrixlab-halo--${profile}`);
+  root.dataset.haloVersion = HALO_VERSION;
+  root.prepend?.(edgeCanvas);
+  root.prepend?.(rainCanvas);
+
+  const media = options.matchMedia?.("(prefers-reduced-motion: reduce)") ||
+    doc.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)") ||
+    globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
+  const scheduler = options.scheduler || getHaloScheduler(options.schedulerOptions);
+  if (options.app) registerHaloMotionSetting(options.app, { scheduler, global: options.settingGlobal });
+  const random = options.random || Math.random;
+  let destroyed = false;
+  let inViewport = true;
+  let drops = [];
+  let unregister = null;
+  let resizeObserver = null;
+  let intersectionObserver = null;
+  let removeInteractionEffects = null;
+  const removeGhostPlacement = bindHaloGhostPlacement(root, node, options.app?.canvas?.canvas);
+  const removeResizeInteraction = bindHaloResizeInteraction(doc, node);
+  const housing = bindHaloNodeHousing(root, node, options.app, rainCanvas);
+  const getZoom = options.getZoom || (() => Number(options.app?.canvas?.ds?.scale) || 1);
+
+  function isEligible() {
+    const locallyEnabled = typeof options.motionEnabled === "function" ? options.motionEnabled() : options.motionEnabled !== false;
+    return !destroyed && locallyEnabled && scheduler.isMotionEnabled() && media?.matches !== true &&
+      !node?.flags?.collapsed && getZoom() > HALO_TOKENS.zoomMotionCutoff && inViewport &&
+      (options.isVisible ? options.isVisible(root, node) : defaultVisible(root, doc));
+  }
+
+  function prepare(canvas, width, height, overscan = 0) {
+    const dpr = Math.min(Number(options.devicePixelRatio || doc.defaultView?.devicePixelRatio || globalThis.devicePixelRatio) || 1, HALO_TOKENS.maxDevicePixelRatio);
+    resizeCanvas(canvas, width + overscan * 2, height + overscan * 2, dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width + overscan * 2, height + overscan * 2);
+    return ctx;
+  }
+
+  function ensureDrops(width, height) {
+    const count = Math.max(3, Math.floor(width / HALO_TOKENS.columnPitch));
+    if (drops.length === count) return;
+    drops = Array.from({ length: count }, (_, column) => ({
+      x: column * HALO_TOKENS.columnPitch + 4,
+      y: random() * (height - HALO_TOKENS.restartMinY) + HALO_TOKENS.restartMinY,
+      speed: HALO_TOKENS.minSpeedPerSecond + random() * (HALO_TOKENS.maxSpeedPerSecond - HALO_TOKENS.minSpeedPerSecond),
+      glyph: Math.floor(random() * HALO_GLYPHS.length),
+    }));
+  }
+
+  function drawFrame(timeSeconds, elapsedSeconds) {
+    if (destroyed) return;
+    const content = logicalSize(root);
+    const bounds = housing.bounds();
+    const frame = bounds || { left: 0, top: 0, ...content };
+    const { width, height } = frame;
+    ensureDrops(width, height);
+    const rain = prepare(rainCanvas, width, height);
+    rainCanvas.style.left = `${frame.left}px`;
+    rainCanvas.style.top = `${frame.top}px`;
+    rainCanvas.style.right = "auto";
+    rainCanvas.style.bottom = "auto";
+    const classicHousing = Boolean(bounds) && options.app?.ui?.settings?.getSettingValue?.("Comfy.VueNodes.Enabled") !== true;
+    rainCanvas.style.visibility = classicHousing ? "hidden" : "visible";
+    const cache = glyphAtlas(doc);
+    rain.save();
+    rain.beginPath();
+    roundedRect(rain, 0, 0, width, height, 15);
+    rain.clip();
+    for (const drop of drops) {
+      drop.y += drop.speed * Math.min(HALO_TOKENS.maxTimeStepSeconds, Math.max(0, elapsedSeconds || 0));
+      if (drop.y > height + HALO_TOKENS.wrapOvershoot) drop.y = HALO_TOKENS.restartMinY + random() * (HALO_TOKENS.restartMaxY - HALO_TOKENS.restartMinY);
+      for (let trail = 0; trail < HALO_TOKENS.trailLength; trail += 1) {
+        const y = drop.y - trail * HALO_TOKENS.trailPitch;
+        if (y < -HALO_TOKENS.glyphCell || y > height) continue;
+        rain.globalAlpha = Math.max(0, HALO_TOKENS.trailAlpha - trail * HALO_TOKENS.trailAlphaStep);
+        rain.drawImage(cache.canvas, ((drop.glyph + trail) % HALO_GLYPHS.length) * cache.cell, 0, cache.cell, cache.cell, drop.x, y, cache.cell, cache.cell);
+      }
+    }
+    rain.restore();
+    const edge = prepare(edgeCanvas, frame.width, frame.height, HALO_TOKENS.canvasOverscan);
+    edgeCanvas.style.left = `${frame.left - HALO_TOKENS.canvasOverscan}px`;
+    edgeCanvas.style.top = `${frame.top - HALO_TOKENS.canvasOverscan}px`;
+    edgeCanvas.style.right = "auto";
+    edgeCanvas.style.bottom = "auto";
+    edge.save();
+    edge.translate(HALO_TOKENS.canvasOverscan, HALO_TOKENS.canvasOverscan);
+    edge.beginPath();
+    const halfEdge = HALO_TOKENS.edgeWidth / 2;
+    roundedRect(edge, halfEdge, halfEdge, Math.max(0, frame.width - HALO_TOKENS.edgeWidth), Math.max(0, frame.height - HALO_TOKENS.edgeWidth), HALO_TOKENS.outerRadius);
+    edge.strokeStyle = HALO_TOKENS.green;
+    edge.shadowColor = HALO_TOKENS.green;
+    edge.shadowBlur = HALO_TOKENS.edgeShadowBlur;
+    edge.lineWidth = HALO_TOKENS.edgeWidth;
+    edge.setLineDash(HALO_TOKENS.edgeDash);
+    edge.lineDashOffset = -((timeSeconds * HALO_TOKENS.edgeSpeed) % HALO_TOKENS.edgeDashCycle);
+    edge.stroke();
+    edge.restore();
+    if (classicHousing) node.setDirtyCanvas?.(true, false);
+  }
+
+  function renderStatic() {
+    drawFrame((globalThis.performance?.now?.() || Date.now()) / 1000, 0);
+  }
+
+  const wake = () => scheduler.wake();
+  if (typeof options.ResizeObserver === "function" || typeof globalThis.ResizeObserver === "function") {
+    const Observer = options.ResizeObserver || globalThis.ResizeObserver;
+    resizeObserver = new Observer(() => { renderStatic(); wake(); });
+    resizeObserver.observe(root);
+  }
+  if (typeof options.IntersectionObserver === "function" || typeof globalThis.IntersectionObserver === "function") {
+    const Observer = options.IntersectionObserver || globalThis.IntersectionObserver;
+    intersectionObserver = new Observer((entries) => {
+      inViewport = entries.some((entry) => entry.target === root && entry.isIntersecting);
+      wake();
+    });
+    intersectionObserver.observe(root);
+  }
+  media?.addEventListener?.("change", wake);
+  unregister = scheduler.register({ isEligible, drawFrame });
+  removeInteractionEffects = installInteractionEffects(root, isEligible);
+
+  const control = {
+    version: HALO_VERSION,
+    profile,
+    root,
+    contentRoot: root,
+    node,
+    scheduler,
+    isEligible,
+    renderStatic,
+    setMotionEnabled(enabled) {
+      options.motionEnabled = enabled !== false;
+      if (options.motionEnabled) wake();
+      else renderStatic();
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      unregister?.();
+      resizeObserver?.disconnect();
+      intersectionObserver?.disconnect();
+      media?.removeEventListener?.("change", wake);
+      removeInteractionEffects?.();
+      removeGhostPlacement();
+      removeResizeInteraction();
+      housing.destroy();
+      rainCanvas.remove?.();
+      edgeCanvas.remove?.();
+      root.classList?.remove("matrixlab-halo", `matrixlab-halo--${profile}`);
+      delete root.dataset.haloVersion;
+      if (root[SURFACE_KEY] === control) delete root[SURFACE_KEY];
+    },
+  };
+  root[SURFACE_KEY] = control;
+  renderStatic();
+  return control;
+}
+
+function linkedInput(node, widgetName) {
+  return (node.inputs || []).some((input) =>
+    (input?.name === widgetName || input?.widget?.name === widgetName) && input.link != null
+  );
+}
+
+function snapshotWidget(widget) {
+  return {
+    widget,
+    draw: widget.draw,
+    computeSize: widget.computeSize,
+    callback: widget.callback,
+    hadOptions: Object.prototype.hasOwnProperty.call(widget, "options"),
+    options: widget.options,
+    hidden: widget.options?.hidden,
+  };
+}
+
+function restoreWidgets(snapshots) {
+  for (const state of snapshots) {
+    state.widget.draw = state.draw;
+    state.widget.computeSize = state.computeSize;
+    if (state.widget.callback === state.watchedCallback) state.widget.callback = state.callback;
+    if (state.hadOptions) {
+      state.widget.options = state.options;
+      if (state.widget.options) state.widget.options.hidden = state.hidden;
+    } else {
+      delete state.widget.options;
+    }
+  }
+}
+
+function hideWidgets(snapshots) {
+  for (const { widget } of snapshots) {
+    widget.options ||= {};
+    widget.options.hidden = true;
+    widget.draw = () => {};
+    widget.computeSize = () => [0, -4];
+  }
+}
+
+function numericKind(widget) {
+  const declared = [
+    widget?.inputData?.[0],
+    widget?.options?.socket,
+    widget?.options?.inputType,
+    widget?.options?.type,
+  ].find((value) => value === "INT" || value === "FLOAT");
+  if (declared) return declared;
+  const precision = Number(widget?.options?.precision);
+  return Number.isFinite(precision) && precision === 0 ? "INT" : "FLOAT";
+}
+
+function finiteOption(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function numericInputStep(widget) {
+  const preferred = finiteOption(widget?.options?.step2);
+  if (preferred !== null && preferred > 0) return preferred;
+  const legacy = finiteOption(widget?.options?.step);
+  // Legacy LiteGraph stores number-widget drag scale at ten times the real
+  // increment. ComfyUI's step2 is already the exact spinner increment.
+  if (legacy !== null && legacy > 0) return legacy / 10;
+  return numericKind(widget) === "INT" ? 1 : "any";
+}
+
+function coerceValue(widget, raw) {
+  if (typeof widget.value === "boolean") return { accepted: true, value: Boolean(raw) };
+  if (typeof widget.value === "number") {
+    if (typeof raw === "string" && raw.trim() === "") return { accepted: false, value: widget.value };
+    let value = Number(raw);
+    if (!Number.isFinite(value)) return { accepted: false, value: widget.value };
+    const kind = numericKind(widget);
+    if (kind === "INT" && !Number.isSafeInteger(value)) return { accepted: false, value: widget.value };
+    const rawMin = finiteOption(widget.options?.min);
+    const rawMax = finiteOption(widget.options?.max);
+    const min = kind === "INT" && rawMin !== null ? Math.ceil(rawMin) : rawMin;
+    const max = kind === "INT" && rawMax !== null ? Math.floor(rawMax) : rawMax;
+    if (min !== null && max !== null && min > max) return { accepted: false, value: widget.value };
+    if (min !== null) value = Math.max(min, value);
+    if (max !== null) value = Math.min(max, value);
+    return { accepted: true, value };
+  }
+  return { accepted: true, value: String(raw) };
+}
+
+// A presentation policy only: keep backend names, values, order and links intact.
+function parameterFieldPresentation(node, widget) {
+  if (["MATRIX_MetadataKiller", "MATRIX_VideoMetadataKiller"].includes(node.comfyClass || node.type)) {
+    return { label: ({ filename_prefix: "Name", format: "Format", quality: "Quality" })[widget.name] };
+  }
+  if ((node.comfyClass || node.type) === "MATRIX_CropTailPaste" && widget.name === "mask_mode") {
+    return { label: "Mask behavior", hidden: false,
+      choices: [
+        { value: "legacy_grow_feather", label: "Grow + feather" },
+        { value: "soft_preserve", label: "Soft mask" },
+      ],
+      title: "Grow + feather preserves legacy mask rounding, dilation and hole filling. Preserve soft mask retains confidence; feather is measured at the working resolution. Zero feather preserves original zero-mask pixels." };
+  }
+  if (["MATRIX_CropTailPaste", "MATRIX_LatentTail"].includes(node.comfyClass || node.type)) {
+    const labels = { guide_size: "Working size", padding_px: "Crop padding",
+      start_sigma: "Start sigma", steps: "Steps", sampler_name: "Sampler",
+      scheduler: "Scheduler", feather_px: "Feather", color_match: "Color match" };
+    return { label: labels[widget.name], hidden: false, choices: null,
+      title: widget.name === "guide_size" ? "Longest edge of the resized working crop; this does not limit source mask coverage."
+        : widget.name === "feather_px" ? "Feather radius in working-resolution pixels. Set zero for exact original-mask paste in Soft mask mode."
+        : "" };
+  }
+  if (!["MATRIX_SpectralSampler", "MATRIXSpectralSampler"].includes(node.comfyClass || node.type)) return null;
+  const value = (name) => node.widgets?.find((item) => item.name === name)?.value;
+  const known = (name) => !linkedInput(node, name);
+  const scales = String(value("scales") ?? "").split(",").map((part) => Number(part.trim()));
+  const native = known("scales") && scales.length === 1 && scales[0] === 1;
+  const manual = known("mode") && value("mode") === "manual";
+  const automatic = known("mode") && value("mode") === "delta_optimal";
+  const named = known("model_preset") && value("model_preset") !== "custom";
+  const labels = {
+    base_sampler: "Base sampler", transform: "Transform", mode: "Transition timing",
+    model_preset: "Spectrum profile", scales: "Resolution path", delta: "Tolerance",
+    manual_sigmas: "Transition sigmas", spectrum_a: "Spectrum amplitude",
+    spectrum_beta: "Spectrum decay", spectral_seed: "Transition seed",
+  };
+  const hidden = !linkedInput(node, widget.name) && (
+    (native && !["base_sampler", "scales"].includes(widget.name)) ||
+    (manual && ["model_preset", "delta", "spectrum_a", "spectrum_beta"].includes(widget.name)) ||
+    (automatic && widget.name === "manual_sigmas") ||
+    (automatic && named && ["spectrum_a", "spectrum_beta"].includes(widget.name))
+  );
+  let choices = null;
+  if (widget.name === "mode") {
+    choices = [{ value: "delta_optimal", label: "Automatic" }, { value: "manual", label: "Manual" }];
+  } else if (widget.name === "scales") {
+    choices = [
+      { value: "1.0", label: "Full resolution" },
+      { value: "0.5,1.0", label: "Half to full" },
+    ];
+    const current = String(widget.value ?? "");
+    if (!choices.some((item) => item.value === current)) {
+      // Preserve custom/linked legacy schedules rather than silently rewriting them.
+      choices.push({ value: current, label: "Existing custom path", disabled: true });
+    }
+  } else if (widget.name === "base_sampler" && known("scales") && !native) {
+    choices = [
+      { value: "euler", label: "Euler" },
+      { value: "euler_ancestral", label: "Euler ancestral" },
+    ];
+    if (!choices.some((item) => item.value === widget.value)) {
+      choices.push({ value: String(widget.value), label: `${widget.value} — full resolution only`, disabled: true });
+    }
+  }
+  return { label: labels[widget.name], hidden, choices,
+    title: widget.name === "scales"
+      ? "Full resolution uses the native sampler. Half to full starts at half width and height, then finishes at the original size. Existing custom or linked paths are preserved."
+      : "" };
+}
+
+const CONTROL_ID_STATE_KEY = Symbol.for("matrixlab.halo.control-id-state");
+
+function allocateControlId(doc) {
+  let state = doc[CONTROL_ID_STATE_KEY];
+  if (!state || typeof state !== "object") {
+    state = { next: 0 };
+    Object.defineProperty(doc, CONTROL_ID_STATE_KEY, { value: state, configurable: true });
+  }
+  state.next += 1;
+  return `matrixlab-halo-control-${state.next}`;
+}
+
+function createWidgetField(doc, node, widget, options) {
+  const field = doc.createElement("div");
+  field.className = "matrixlab-halo__field";
+  const label = doc.createElement("label");
+  label.textContent = widget.label || widget.name;
+  // Nodes can mount before ComfyUI replaces their shared temporary id (-1). Keep
+  // presentation identity document-local and shared across independently loaded packs.
+  const inputId = allocateControlId(doc);
+  label.htmlFor = inputId;
+  let control;
+  const choices = () => {
+    const presented = parameterFieldPresentation(node, widget)?.choices;
+    if (presented) return presented;
+    const values = typeof widget.options?.values === "function"
+      ? widget.options.values.call(widget) : widget.options?.values;
+    return Array.isArray(values) ? values : Array.isArray(widget.options) ? widget.options : null;
+  };
+  let renderedChoices = null;
+  const promptEditor = (node.comfyClass || node.type) === "MATRIX_Prompt" && widget.name === "prompt";
+  if (choices()) {
+    control = doc.createElement("select");
+    applyHaloSelect(control);
+  } else if (promptEditor) {
+    control = doc.createElement("textarea");
+    control.rows = 8;
+    control.spellcheck = true;
+    control.wrap = "soft";
+    field.className += " matrixlab-halo__field--prompt";
+  } else {
+    control = doc.createElement("input");
+    control.type = typeof widget.value === "boolean" ? "checkbox" : typeof widget.value === "number" ? "number" : "text";
+    if (finiteOption(widget.options?.min) !== null) control.min = String(widget.options.min);
+    if (finiteOption(widget.options?.max) !== null) control.max = String(widget.options.max);
+    if (typeof widget.value === "number") control.step = String(numericInputStep(widget));
+  }
+  control.id = inputId;
+  const render = () => {
+    const presentation = parameterFieldPresentation(node, widget);
+    label.textContent = presentation?.label || widget.label || widget.name;
+    field.hidden = Boolean(presentation?.hidden);
+    // Explicit display handles host styles that override the HTML hidden rule.
+    field.style.display = field.hidden ? "none" : "";
+    control.title = presentation?.title || "";
+    if (control.tagName === "SELECT") {
+      if (presentation) {
+        control.style.width = "152px";
+        control.style.flexBasis = "152px";
+      }
+      const values = (choices() || []).map((value) => typeof value === "object"
+        ? value : { value: String(value), label: String(value) });
+      const signature = JSON.stringify(values);
+      if (signature !== renderedChoices) {
+        control.replaceChildren(...values.map(item => {
+          const option = doc.createElement("option");
+          option.value = item.value;
+          option.textContent = item.label;
+          option.disabled = Boolean(item.disabled);
+          return option;
+        }));
+        renderedChoices = signature;
+      }
+    }
+    const linked = linkedInput(node, widget.name);
+    field.dataset.linked = String(linked);
+    control.disabled = linked;
+    if (control.type === "checkbox") control.checked = Boolean(widget.value);
+    else control.value = String(widget.value ?? "");
+    marker.hidden = !linked;
+  };
+  const commit = (event) => {
+    if (linkedInput(node, widget.name) || parameterFieldPresentation(node, widget)?.hidden) { render(); return; }
+    const raw = control.type === "checkbox" ? control.checked : control.value;
+    const allowed = parameterFieldPresentation(node, widget)?.choices;
+    if (allowed && !allowed.some((item) => item.value === raw && !item.disabled)) { render(); return; }
+    const result = coerceValue(widget, raw);
+    if (!result.accepted) { render(); return; }
+    const next = result.value;
+    if (Object.is(next, widget.value)) { render(); return; }
+    const position = options.getCallbackPosition?.(event, node) ?? node.pos;
+    const graph = node.graph;
+    const canvas = options.app?.canvas || options.canvas || null;
+    graph?.beforeChange?.();
+    // ComfyUI history listens to the canvas events, independently of graph hooks.
+    canvas?.emitBeforeChange?.();
+    try {
+      widget.value = next;
+      widget.callback?.call(widget, next, canvas, node, position, event);
+    } finally {
+      try { render(); }
+      finally {
+        try { graph?.afterChange?.(); }
+        finally { canvas?.emitAfterChange?.(); }
+      }
+    }
+  };
+  control.addEventListener("change", commit);
+  if (promptEditor) control.addEventListener("input", commit);
+  const marker = doc.createElement("span");
+  marker.className = "matrixlab-halo__linked";
+  marker.textContent = "LINKED";
+  field.append(label, control, marker);
+  render();
+  return { field, control, render, promptEditor, destroy: () => {
+    control.removeEventListener("change", commit);
+    if (promptEditor) control.removeEventListener("input", commit);
+  } };
+}
+
+// Export is a projection of the existing format/quality pair, never a saved widget.
+function createMetadataFields(doc, node, widgets, options) {
+  const format = widgets.find(widget => widget.name === "format");
+  const quality = widgets.find(widget => widget.name === "quality");
+  if (!format || !quality) return widgets.map(widget => createWidgetField(doc, node, widget, options));
+  const native = widgets.map(widget => createWidgetField(doc, node, widget, options));
+  const nativeRenderers = native.map(entry => entry.render);
+  const byName = new Map(widgets.map((widget, index) => [widget.name, native[index]]));
+  const field = doc.createElement("div"); field.className = "matrixlab-halo__field";
+  field.style.flexWrap = "nowrap";
+  const label = doc.createElement("label"); label.textContent = "Export";
+  label.style.flex = "0 0 auto";
+  const select = doc.createElement("select"); applyHaloSelect(select);
+  select.id = allocateControlId(doc); label.htmlFor = select.id;
+  Object.assign(select.style, { width: "auto", flex: "1 1 180px", minWidth: "0" });
+  for (const [value, title] of [["high", "JPEG · High quality"], ["small", "JPEG · Smaller file"], ["png", "PNG · Lossless"], ["custom", "JPEG · Custom"]]) {
+    const item = doc.createElement("option"); item.value = value; item.textContent = title; select.appendChild(item);
+  }
+  field.append(label, select);
+  // Editor-open intent is disposable. Restored tuples always derive their preset.
+  const isCustomTuple = () => format.value === "JPEG" && ![95, 85].includes(quality.value);
+  let customEditorOpen = isCustomTuple();
+  const linked = () => linkedInput(node, "format") || linkedInput(node, "quality");
+  const preset = () => format.value === "PNG" ? "png"
+    : customEditorOpen ? "custom"
+    : quality.value === 95 ? "high" : quality.value === 85 ? "small" : "custom";
+  const visible = (entry, show) => { entry.field.hidden = !show; entry.field.style.display = show ? "" : "none"; };
+  const render = () => {
+    nativeRenderers.forEach(renderNative => renderNative());
+    select.value = preset(); select.disabled = linked(); field.dataset.linked = String(linked());
+    visible(byName.get("format"), linked());
+    visible(byName.get("quality"), linked() || preset() === "custom");
+    const name = byName.get("filename_prefix");
+    if (name) {
+      name.field.style.flexWrap = "nowrap"; name.field.children[0].style.flex = "0 0 auto";
+      Object.assign(name.control.style, { width: "auto", flex: "1 1 180px", textAlign: "left" });
+    }
+  };
+  const commit = event => {
+    if (linked() || !["high", "small", "png", "custom"].includes(select.value)) { render(); return; }
+    const choice = select.value;
+    const nextFormat = choice === "png" ? "PNG" : "JPEG";
+    const nextQuality = choice === "high" ? 95 : choice === "small" ? 85 : quality.value;
+    const changed = [[format, nextFormat], [quality, nextQuality]].filter(([widget, value]) => !Object.is(widget.value, value));
+    customEditorOpen = choice === "custom";
+    if (!changed.length) { render(); options.onMetadataLayoutChange?.(); return; }
+    const canvas = options.app?.canvas || options.canvas || null;
+    node.graph?.beforeChange?.(); canvas?.emitBeforeChange?.();
+    try {
+      // Both values are authoritative before either native callback observes them.
+      changed.forEach(([widget, value]) => { widget.value = value; });
+      changed.forEach(([widget, value]) => widget.callback?.call(widget, value, canvas, node,
+        options.getCallbackPosition?.(event, node) ?? node.pos, event));
+    } finally {
+      try { render(); options.onMetadataLayoutChange?.(); }
+      finally { try { node.graph?.afterChange?.(); } finally { canvas?.emitAfterChange?.(); } }
+    }
+  };
+  select.addEventListener("change", commit);
+  const exportField = { field, render, reset() { customEditorOpen = isCustomTuple(); render(); },
+    destroy() { select.removeEventListener("change", commit); } };
+  native.forEach(entry => { entry.render = render; });
+  render();
+  const nameIndex = widgets.findIndex(widget => widget.name === "filename_prefix");
+  const fields = [...native]; fields.splice(nameIndex < 0 ? 0 : nameIndex + 1, 0, exportField);
+  return fields;
+}
+
+// Keep output history in ComfyUI; own only the presentation of this node's saved images.
+export function mountHaloSavedImages(node, root, options = {}) {
+  const doc = root.ownerDocument;
+  const section = doc.createElement("section");
+  section.className = "matrixlab-halo__saved-images";
+  Object.assign(section.style, { display: "flex", flexDirection: "column", flex: "1 1 180px", minHeight: "180px", minWidth: "0", gap: "8px", position: "relative", zIndex: "2" });
+  const viewport = doc.createElement("div");
+  Object.assign(viewport.style, { position: "relative", flex: "1 1 auto", minHeight: "130px", overflow: "hidden", borderRadius: "9px", background: "rgba(0,0,0,0.25)" });
+  const status = doc.createElement("span");
+  status.textContent = "Saved image appears here";
+  status.setAttribute("aria-live", "polite");
+  const savedStatus = doc.createElement("span");
+  savedStatus.className = "matrixlab-halo__saved-status";
+  Object.assign(savedStatus.style, { minWidth: "0", overflowWrap: "anywhere" });
+  const stale = doc.createElement("span"); stale.textContent = "Previous preview · loading selected image";
+  Object.assign(stale.style, { position: "absolute", inset: "auto 0 0", zIndex: "1", padding: "8px", background: HALO_TOKENS.linkedSurface, color: HALO_TOKENS.primaryText });
+  stale.hidden = true;
+  const toolbar = doc.createElement("div");
+  Object.assign(toolbar.style, { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" });
+  const previous = doc.createElement("button"); previous.type = "button"; previous.textContent = "Previous";
+  const next = doc.createElement("button"); next.type = "button"; next.textContent = "Next";
+  const open = doc.createElement("a"); open.textContent = "Open original";
+  open.setAttribute("aria-haspopup", "dialog");
+  const download = doc.createElement("a"); download.textContent = "Download original";
+  const retry = doc.createElement("button"); retry.type = "button"; retry.textContent = "Retry preview"; retry.hidden = true;
+  toolbar.append(previous, status, next, open, download, retry);
+  section.append(viewport, toolbar, savedStatus); root.appendChild(section);
+  let descriptors = [], selected = 0, pendingImage = null, displayedImage = null, revision = 0, destroyed = false;
+  let lastSignature = null;
+  let originalViewer = null;
+  // At most three decoded thumbnails per node, independent of batch length.
+  const cache = new Map();
+  const previousHidden = node.hideOutputImages;
+  const nativeIdentity = new Map(["images", "preview"].map(name => [name,
+    { own: Object.prototype.hasOwnProperty.call(node, name), value: node[name], assigned: undefined }]));
+  let ownsHidden = false;
+  const nativeWidgets = new Map();
+  const outputKey = () => node.graph?.isRootGraph === false ? `${node.graph.id}:${node.id}` : String(node.id);
+  const storedOutput = () => options.app?.nodeOutputs?.[outputKey()];
+  const syncNativeWidgets = () => {
+    for (const widget of node.widgets || []) {
+      if (widget.name !== "$$canvas-image-preview") continue;
+      if (ownsHidden && !nativeWidgets.has(widget)) {
+        nativeWidgets.set(widget, { hidden: widget.hidden, computeLayoutSize: widget.computeLayoutSize });
+        widget.hidden = true;
+        widget.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0, minWidth: 0 });
+      }
+    }
+    if (!ownsHidden) {
+      for (const [widget, state] of nativeWidgets) { widget.hidden = state.hidden; widget.computeLayoutSize = state.computeLayoutSize; }
+      nativeWidgets.clear();
+    }
+  };
+  const originalBackground = node.onDrawBackground;
+  const background = function (...args) {
+    prepareNative(storedOutput());
+    update(storedOutput());
+    try { return originalBackground?.apply(this, args); }
+    finally { syncNativeWidgets(); }
+  };
+  node.onDrawBackground = background;
+  const hideNative = (hidden) => {
+    const changed = hidden ? node.hideOutputImages !== true : ownsHidden;
+    if (hidden) { node.hideOutputImages = true; ownsHidden = true; }
+    else { if (ownsHidden && node.hideOutputImages === true) node.hideOutputImages = previousHidden; ownsHidden = false; }
+    syncNativeWidgets();
+    if (changed) node.setDirtyCanvas?.(true, true);
+  };
+  const cancelLoad = () => {
+    if (pendingImage) {
+      const image = pendingImage; pendingImage = null;
+      image.onload = null; image.onerror = null;
+      // Removing the actual browser source cancels the in-flight image fetch.
+      image.removeAttribute?.("src");
+    }
+  };
+  const prepareNative = output => {
+    if (destroyed) return;
+    hideNative(true);
+    // Classic updatePreviews compares these exact references before requesting
+    // URLs. Acknowledge its store without removing output/history descriptors.
+    const stored = storedOutput() || output;
+    if (stored && Object.prototype.hasOwnProperty.call(stored, "images")) {
+      node.images = stored.images; nativeIdentity.get("images").assigned = stored.images;
+    }
+    const previews = options.app?.nodePreviewImages?.[outputKey()];
+    if (previews) {
+      node.preview = previews; nativeIdentity.get("preview").assigned = previews;
+    }
+  };
+  const urlFor = (descriptor, thumbnail = false) => {
+    const query = new URLSearchParams({ filename: descriptor.filename, subfolder: descriptor.subfolder || "", type: descriptor.type || "output" });
+    if (thumbnail) query.set("preview", "webp;90");
+    return options.imageURL?.(query) ?? `${options.app?.api?.apiURL?.("/view") || "./view"}?${query}`;
+  };
+  const closeOriginal = () => {
+    const viewer = originalViewer;
+    if (!viewer) return;
+    originalViewer = null;
+    viewer.image.onload = null; viewer.image.onerror = null;
+    viewer.image.removeAttribute?.("src");
+    viewer.close.removeEventListener("click", viewer.dismiss);
+    viewer.dialog.removeEventListener("cancel", viewer.dismiss);
+    viewer.dialog.removeEventListener("close", viewer.dismiss);
+    viewer.dialog.removeEventListener("keydown", viewer.keydown);
+    doc.removeEventListener?.("keydown", viewer.keydown, true);
+    doc.removeEventListener?.("keyup", viewer.isolateKeyboard, true);
+    if (viewer.dialog.open) viewer.dialog.close?.();
+    viewer.dialog.remove();
+    if (!destroyed && open.isConnected) open.focus?.();
+  };
+  const openOriginal = event => {
+    if (destroyed || open.hidden || !descriptors[selected]) { event?.preventDefault?.(); return; }
+    // Attach to the document, outside ComfyUI's scaled canvas DOM. The original
+    // has no source until this explicit action successfully opens a native modal.
+    const descriptor = descriptors[selected];
+    const dialog = doc.createElement("dialog");
+    const parent = doc.body || doc.documentElement;
+    if (typeof dialog.showModal !== "function" || !parent?.appendChild) {
+      return; // Preserve the original href as a normal link on older frontends.
+    }
+    event?.preventDefault?.(); event?.stopPropagation?.();
+    closeOriginal();
+    dialog.className = "matrixlab-halo matrixlab-halo__original-dialog";
+    Object.assign(dialog.style, { position: "fixed", margin: "auto", boxSizing: "border-box", padding: "16px",
+      width: "min(1100px, 94vw)", maxWidth: "94vw", maxHeight: "94vh", overflow: "auto",
+      border: `1px solid ${HALO_TOKENS.fieldBorder}`, borderRadius: "12px",
+      background: HALO_TOKENS.body, color: HALO_TOKENS.primaryText });
+    const heading = doc.createElement("div");
+    Object.assign(heading.style, { display: "flex", gap: "12px", alignItems: "center", justifyContent: "space-between" });
+    const title = doc.createElement("h2"); title.id = allocateControlId(doc);
+    title.textContent = `Original · ${descriptor.filename}`;
+    Object.assign(title.style, { margin: "0", fontSize: "14px", overflowWrap: "anywhere", minWidth: "0" });
+    dialog.setAttribute("aria-labelledby", title.id);
+    const close = doc.createElement("button"); close.type = "button"; close.textContent = "Close"; close.autofocus = true;
+    Object.assign(close.style, { flex: "0 0 auto", padding: "6px 12px", border: `1px solid ${HALO_TOKENS.fieldBorder}`,
+      borderRadius: "6px", background: HALO_TOKENS.parameterField, color: HALO_TOKENS.primaryText });
+    const feedback = doc.createElement("p"); feedback.setAttribute("role", "status"); feedback.textContent = "Loading original…";
+    const image = doc.createElement("img"); image.alt = descriptor.filename;
+    Object.assign(image.style, { display: "block", width: "100%", height: "min(72vh, 900px)", objectFit: "contain" });
+    heading.append(title, close); dialog.append(heading, feedback, image);
+    const dismiss = event => { event?.preventDefault?.(); event?.stopPropagation?.(); closeOriginal(); };
+    const isolateKeyboard = event => {
+      if (destroyed || originalViewer !== viewer || !dialog.open) return false;
+      event.stopImmediatePropagation?.(); event.stopPropagation?.();
+      return true;
+    };
+    const keydown = event => {
+      if (!isolateKeyboard(event)) return;
+      if (event.key === "Escape") dismiss(event);
+      else if (event.key === "Tab") {
+        // The viewer has one interactive control. Native traversal can escape
+        // to BODY in the embedded host, so cycle explicitly in both directions.
+        event.preventDefault?.(); close.focus?.();
+      }
+    };
+    const viewer = { dialog, close, image, dismiss, keydown, isolateKeyboard };
+    originalViewer = viewer;
+    close.addEventListener("click", dismiss); dialog.addEventListener("cancel", dismiss);
+    dialog.addEventListener("close", dismiss); dialog.addEventListener("keydown", keydown);
+    // Capture outside the canvas also handles Escape after host focus escapes.
+    // Keep native button activation/scroll defaults; isolate graph shortcuts.
+    doc.addEventListener?.("keydown", keydown, true);
+    doc.addEventListener?.("keyup", isolateKeyboard, true);
+    image.onload = () => {
+      if (destroyed || originalViewer !== viewer) return;
+      feedback.textContent = "Original loaded";
+    };
+    image.onerror = () => {
+      if (destroyed || originalViewer !== viewer) return;
+      feedback.textContent = "Original could not be loaded. Close and try again, or use Download original.";
+      image.hidden = true; image.style.display = "none";
+    };
+    try {
+      parent.appendChild(dialog); dialog.showModal(); close.focus?.();
+      image.src = urlFor(descriptor);
+    } catch {
+      closeOriginal(); status.textContent = "Original viewer unavailable. Use Download original.";
+    }
+  };
+  const keyFor = descriptor => JSON.stringify([descriptor.filename, descriptor.subfolder || "", descriptor.type || "output",
+    descriptor.matrix_preview?.filename || "", descriptor.matrix_preview?.subfolder || "", descriptor.matrix_preview?.type || ""]);
+  const setStale = message => {
+    stale.hidden = !displayedImage; stale.textContent = message;
+    if (displayedImage) viewport.replaceChildren(displayedImage, stale);
+  };
+  const show = () => {
+    cancelLoad();
+    const token = ++revision;
+    previous.disabled = selected <= 0; next.disabled = selected >= descriptors.length - 1;
+    previous.hidden = next.hidden = descriptors.length <= 1;
+    retry.hidden = true;
+    open.hidden = download.hidden = true;
+    if (!descriptors.length) {
+      viewport.replaceChildren(); displayedImage = null; stale.hidden = true;
+      status.textContent = "Saved image appears here"; savedStatus.textContent = ""; return;
+    }
+    const descriptor = descriptors[selected];
+    const originalURL = urlFor(descriptor);
+    const preview = descriptor.matrix_preview;
+    const url = preview?.filename && preview.type === "temp" ? urlFor(preview) : urlFor(descriptor, true);
+    hideNative(true);
+    open.href = download.href = originalURL; download.download = descriptor.filename;
+    open.hidden = download.hidden = false;
+    open.title = download.title = `Selected saved original: ${descriptor.filename}`;
+    savedStatus.textContent = `Saved: ${descriptor.filename}${descriptor.matrix_metadata_verified === true ? " · Metadata verified" : ""}`;
+    const key = keyFor(descriptor);
+    const showReady = image => {
+      displayedImage = image; stale.hidden = true; viewport.replaceChildren(image);
+      status.textContent = `Preview ${selected + 1} / ${descriptors.length}`;
+    };
+    if (cache.has(key)) {
+      const cached = cache.get(key); cache.delete(key); cache.set(key, cached); showReady(cached); return;
+    }
+    const image = doc.createElement("img"); pendingImage = image;
+    image.alt = descriptor.filename;
+    Object.assign(image.style, { position: "absolute", inset: "0", width: "100%", height: "100%", objectFit: "contain" });
+    status.textContent = `Loading preview ${selected + 1} / ${descriptors.length}`;
+    setStale("Previous preview · loading selected image");
+    image.onload = () => {
+      if (destroyed || revision !== token) return;
+      pendingImage = null; image.onload = null; image.onerror = null;
+      cache.set(key, image);
+      while (cache.size > 3) cache.delete(cache.keys().next().value);
+      showReady(image);
+    };
+    image.onerror = () => {
+      if (destroyed || revision !== token) return;
+      cancelLoad(); status.textContent = "Preview unavailable"; retry.hidden = false;
+      setStale("Previous preview · selected preview unavailable");
+    };
+    image.src = url;
+  };
+  const update = (output) => {
+    if (destroyed || !output || !Object.prototype.hasOwnProperty.call(output, "images")) return;
+    prepareNative(output);
+    const incoming = Array.isArray(output.images) ? output.images.filter(item => item && typeof item.filename === "string" && item.filename) : [];
+    const signature = JSON.stringify(incoming.map(item => [keyFor(item), item.matrix_metadata_verified === true]));
+    if (signature === lastSignature) return;
+    const selectedKey = descriptors[selected] && keyFor(descriptors[selected]);
+    lastSignature = signature; descriptors = incoming;
+    const retained = descriptors.findIndex(item => keyFor(item) === selectedKey);
+    selected = retained < 0 ? 0 : retained;
+    const keep = new Set(descriptors.map(keyFor));
+    for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key);
+    show();
+  };
+  const goPrevious = () => { if (selected > 0) { selected--; show(); } };
+  const goNext = () => { if (selected + 1 < descriptors.length) { selected++; show(); } };
+  const retryPreview = () => { if (!destroyed && descriptors.length && !retry.hidden) show(); };
+  previous.addEventListener("click", goPrevious); next.addEventListener("click", goNext);
+  open.addEventListener("click", openOriginal);
+  retry.addEventListener("click", retryPreview);
+  prepareNative(storedOutput()); show();
+  return { section, update, prepareNative, storedOutput,
+    minimumHeight: () => 130 + (Number(toolbar.offsetHeight) || 64) + (Number(savedStatus.offsetHeight) || 32) + 16,
+    destroy() {
+    destroyed = true; revision++; closeOriginal(); cancelLoad(); hideNative(false);
+    for (const image of cache.values()) image.removeAttribute?.("src");
+    displayedImage?.removeAttribute?.("src"); viewport.replaceChildren();
+    cache.clear(); displayedImage = null;
+    for (const [name, state] of nativeIdentity) {
+      if (state.assigned !== undefined && node[name] === state.assigned) {
+        if (state.own) node[name] = state.value; else delete node[name];
+      }
+    }
+    if (node.onDrawBackground === background) node.onDrawBackground = originalBackground;
+    previous.removeEventListener("click", goPrevious); next.removeEventListener("click", goNext);
+    open.removeEventListener("click", openOriginal);
+    retry.removeEventListener("click", retryPreview); section.remove();
+  } };
+}
+
+// PreviewVideo intentionally returns the established ComfyUI `images` descriptor
+// envelope with `animated: (true,)`. Keep VIDEO sockets and history native; this
+// adapter only replaces the duplicate canvas preview for the exact video saver.
+export function mountHaloSavedVideos(node, root, options = {}) {
+  const doc = root.ownerDocument;
+  const section = doc.createElement("section");
+  section.className = "matrixlab-halo__saved-videos";
+  Object.assign(section.style, { display: "flex", flexDirection: "column", flex: "1 1 220px", minHeight: "220px", minWidth: "0", gap: "8px", position: "relative", zIndex: "2" });
+  const viewport = doc.createElement("div");
+  Object.assign(viewport.style, { position: "relative", flex: "1 1 auto", minHeight: "170px", overflow: "hidden", borderRadius: "9px", background: "rgba(0,0,0,0.25)" });
+  const video = doc.createElement("video");
+  video.controls = true;
+  video.autoplay = false;
+  video.preload = "metadata";
+  video.playsInline = true;
+  Object.assign(video.style, { display: "block", width: "100%", height: "100%", objectFit: "contain", background: "transparent" });
+  const footer = doc.createElement("div");
+  Object.assign(footer.style, { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" });
+  const status = doc.createElement("span");
+  status.textContent = "Saved video appears here";
+  status.setAttribute("aria-live", "polite");
+  const open = doc.createElement("a");
+  open.textContent = "Open saved video";
+  open.hidden = true;
+  footer.append(status, open);
+  viewport.appendChild(video);
+  section.append(viewport, footer);
+  root.appendChild(section);
+
+  let destroyed = false;
+  let revision = 0;
+  let lastSignature = null;
+  const previousHidden = node.hideOutputImages;
+  let ownsHidden = false;
+  const nativeWidgets = new Map();
+  const nativeIdentity = new Map(["images", "preview"].map(name => [name,
+    { own: Object.prototype.hasOwnProperty.call(node, name), value: node[name], assigned: undefined }]));
+  const outputKey = () => node.graph?.isRootGraph === false ? `${node.graph.id}:${node.id}` : String(node.id);
+  const storedOutput = () => options.app?.nodeOutputs?.[outputKey()];
+  const syncNativeWidgets = () => {
+    for (const widget of node.widgets || []) {
+      if (!["$$canvas-image-preview", "video-preview"].includes(widget.name)) continue;
+      if (ownsHidden && !nativeWidgets.has(widget)) {
+        nativeWidgets.set(widget, { hidden: widget.hidden, computeLayoutSize: widget.computeLayoutSize,
+          options: widget.options, optionHidden: widget.options?.hidden, elementHidden: widget.element?.hidden });
+        widget.hidden = true;
+        widget.options ||= {};
+        widget.options.hidden = true;
+        if (widget.element) widget.element.hidden = true;
+        widget.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0, minWidth: 0 });
+      }
+    }
+    if (!ownsHidden) {
+      for (const [widget, state] of nativeWidgets) {
+        widget.hidden = state.hidden; widget.computeLayoutSize = state.computeLayoutSize;
+        if (state.options) state.options.hidden = state.optionHidden;
+        widget.options = state.options;
+        if (widget.element) widget.element.hidden = state.elementHidden;
+      }
+      nativeWidgets.clear();
+    }
+  };
+  const hideNative = hidden => {
+    const changed = hidden ? node.hideOutputImages !== true : ownsHidden;
+    if (hidden) { node.hideOutputImages = true; ownsHidden = true; }
+    else { if (ownsHidden && node.hideOutputImages === true) node.hideOutputImages = previousHidden; ownsHidden = false; }
+    syncNativeWidgets();
+    if (changed) node.setDirtyCanvas?.(true, true);
+  };
+  const descriptorFrom = output => Array.isArray(output?.images)
+    ? output.images.find(item => item && typeof item.filename === "string" && item.filename)
+    : null;
+  const prepareNative = output => {
+    if (destroyed) return;
+    const stored = storedOutput() || output;
+    const descriptor = descriptorFrom(stored);
+    hideNative(Boolean(descriptor));
+    if (descriptor && Object.prototype.hasOwnProperty.call(stored, "images")) {
+      node.images = stored.images;
+      nativeIdentity.get("images").assigned = stored.images;
+    }
+    const previews = options.app?.nodePreviewImages?.[outputKey()];
+    if (previews) {
+      node.preview = previews;
+      nativeIdentity.get("preview").assigned = previews;
+    }
+  };
+  const urlFor = descriptor => {
+    const query = new URLSearchParams({ filename: descriptor.filename, subfolder: descriptor.subfolder || "", type: descriptor.type || "output" });
+    return options.videoURL?.(query) ?? options.imageURL?.(query) ?? `${options.app?.api?.apiURL?.("/view") || "./view"}?${query}`;
+  };
+  const clearVideo = () => {
+    revision++;
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.pause?.();
+    video.removeAttribute?.("src");
+    video.load?.();
+  };
+  const update = output => {
+    if (destroyed || !output || !Object.prototype.hasOwnProperty.call(output, "images")) return;
+    const descriptor = descriptorFrom(output);
+    prepareNative(output);
+    const signature = descriptor ? JSON.stringify([descriptor.filename, descriptor.subfolder || "", descriptor.type || "output"]) : "";
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    clearVideo();
+    if (!descriptor) {
+      viewport.hidden = true;
+      open.hidden = true;
+      status.textContent = "Saved video appears here";
+      return;
+    }
+    viewport.hidden = false;
+    const token = revision;
+    const url = urlFor(descriptor);
+    open.href = url;
+    open.hidden = false;
+    open.title = `Saved video: ${descriptor.filename}`;
+    status.textContent = `Loading ${descriptor.filename}`;
+    video.onloadedmetadata = () => {
+      if (!destroyed && revision === token) status.textContent = `Saved: ${descriptor.filename}`;
+    };
+    video.onerror = () => {
+      if (!destroyed && revision === token) status.textContent = "Saved video preview unavailable";
+    };
+    video.src = url;
+    video.load?.();
+  };
+  const originalBackground = node.onDrawBackground;
+  const background = function (...args) {
+    const output = storedOutput();
+    prepareNative(output);
+    update(output);
+    try { return originalBackground?.apply(this, args); }
+    finally { syncNativeWidgets(); }
+  };
+  node.onDrawBackground = background;
+  prepareNative(storedOutput());
+  update(storedOutput());
+  return {
+    section, video, update, prepareNative, storedOutput,
+    minimumHeight: () => 170 + (Number(footer.offsetHeight) || 32) + 16,
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      clearVideo();
+      hideNative(false);
+      for (const [name, state] of nativeIdentity) {
+        if (state.assigned !== undefined && node[name] === state.assigned) {
+          if (state.own) node[name] = state.value; else delete node[name];
+        }
+      }
+      if (node.onDrawBackground === background) node.onDrawBackground = originalBackground;
+      section.remove();
+    },
+  };
+}
+
+function mountHaloPrimitiveNode(node, options = {}, allowedIds = EXECUTION_IDS, profile = "execution") {
+  const nodeType = node?.comfyClass || node?.type;
+  if (!allowedIds.has(nodeType) || !node || typeof node.addDOMWidget !== "function") return null;
+  if (node[EXECUTION_KEY]) return node[EXECUTION_KEY];
+  const doc = options.document || globalThis.document;
+  if (!doc?.createElement) return null;
+  const canonicalWidgets = [...(node.widgets || [])].filter(widget => widget.name !== "$$canvas-image-preview");
+  const snapshots = canonicalWidgets.map(snapshotWidget);
+  const beforeMount = new Set(node.widgets || []);
+  const root = doc.createElement("div");
+  root.className = "matrixlab-halo__content";
+  const host = createHaloWidgetHost(root, doc);
+  if (!host) return null;
+  // BaseWidget.widgetId is getter-only and derives from graph/node/widget name.
+  // A fresh non-serializing name therefore gives each reconstruction a supported
+  // Vue render identity without mutating ComfyUI's widget object.
+  const presentationBaseName = profile === "execution" ? "matrixlab_halo_execution_ui" : "matrixlab_halo_utility_ui";
+  const presentationName = `${presentationBaseName}_${allocateControlId(doc)}`;
+  const namedWidgets = canonicalWidgets.filter(widget => widget?.name);
+  const fieldOptions = { ...options, onMetadataLayoutChange: () => scheduleMinimum() };
+  const fields = nodeType === "MATRIX_MetadataKiller"
+    ? createMetadataFields(doc, node, namedWidgets, fieldOptions)
+    : namedWidgets.map(widget => createWidgetField(doc, node, widget, options));
+  for (const field of fields) root.appendChild(field.field);
+  const savedImages = nodeType === "MATRIX_MetadataKiller" ? mountHaloSavedImages(node, root, options) : null;
+  const savedVideos = nodeType === "MATRIX_VideoMetadataKiller" ? mountHaloSavedVideos(node, root, options) : null;
+  const promptEditor = fields.find(field => field.promptEditor);
+  const resizableContent = savedImages || savedVideos || promptEditor;
+  if (resizableContent) Object.assign(root.style, { flex: "1 1 auto", minHeight: "0" });
+  const contentMinimum = () => savedImages
+    ? Math.max(fields.filter(({ field }) => !field.hidden).length * 46 + 36,
+      ...fields.filter(({ field }) => !field.hidden).map(({ field }) => (Number(field.offsetTop) || 0) + (Number(field.offsetHeight) || 0) + 18)) + savedImages.minimumHeight()
+    : savedVideos
+      ? Math.max(fields.filter(({ field }) => !field.hidden).length * 46 + 36,
+        ...fields.filter(({ field }) => !field.hidden).map(({ field }) => (Number(field.offsetTop) || 0) + (Number(field.offsetHeight) || 0) + 18)) + savedVideos.minimumHeight()
+    : promptEditor
+      ? 224
+    : measureHaloContentHeight(root, fields.filter(({ field }) => !field.hidden).length * 46 + 36);
+  let presentation = null;
+  let halo = null;
+  let destroyed = false;
+  let presentationRemoval = null;
+  let presentationCleanupPending = false;
+  let resizeTimer = null;
+  let sizingObserver = null;
+  let previousResize = node.onResize;
+  let wrappedResize = null;
+  let previousRemoved = node.onRemoved;
+  let wrappedRemoved = null;
+  let measuredHorizontalChrome = null;
+  const refreshHooks = [];
+
+  const removePresentation = () => {
+    if (!Array.isArray(node.widgets)) return;
+    for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+      const widget = node.widgets[index];
+      if (!beforeMount.has(widget) && (widget === presentation || widget?.element === host || widget?.name === presentationName)) {
+        node.widgets.splice(index, 1);
+      }
+    }
+  };
+  const unregisterPresentation = () => {
+    if (!presentationCleanupPending) return;
+    presentationCleanupPending = false;
+    presentation?.onRemove?.();
+  };
+  const rollback = () => {
+    clearTimeout(resizeTimer);
+    sizingObserver?.disconnect();
+    fields.forEach((field) => field.destroy());
+    for (const { name, previous, wrapped } of refreshHooks) {
+      if (node[name] === wrapped) node[name] = previous;
+    }
+    restoreWidgets(snapshots);
+    halo?.destroy();
+    savedImages?.destroy();
+    savedVideos?.destroy();
+    removePresentation();
+    root.remove?.();
+    host.remove?.();
+  };
+
+  try {
+    presentation = node.addDOMWidget(presentationName, "matrixlab-halo", host, {
+      serialize: false,
+      hideOnZoom: false,
+      getMinHeight: () => haloWidgetLayoutHeight(contentMinimum(), presentation),
+      getHeight: () => haloWidgetLayoutHeight(contentMinimum(), presentation),
+      afterResize: () => fields.forEach((field) => field.render()),
+    });
+    // addDOMWidget installs its unregister callback in node.onRemoved. Capture it
+    // before checking the result or performing any other fallible setup.
+    presentationRemoval = node.onRemoved;
+    presentationCleanupPending = Boolean(presentation);
+    if (!presentation) throw new Error("ComfyUI did not create the HALO DOM widget");
+    presentation.serialize = false;
+    presentation.options ||= {};
+    presentation.options.serialize = false;
+    halo = mountHaloSurface(root, node, { ...options, profile });
+    if (!halo) throw new Error("HALO surface mount failed");
+    hideWidgets(snapshots);
+  } catch (error) {
+    unregisterPresentation();
+    rollback();
+    if (node.onRemoved === presentationRemoval) node.onRemoved = previousRemoved;
+    options.onError?.(error);
+    return null;
+  }
+
+  const minimumSize = () => {
+    if (destroyed) return;
+    const currentWidth = Number(node.size?.[0]) || 0;
+    const currentHeight = Number(node.size?.[1]) || 0;
+    const minimumWidth = profile === "execution" ? HALO_TOKENS.executionMinWidth : HALO_TOKENS.uiMinWidth;
+    const suppliedChrome = options.getRendererChrome?.(node, presentation);
+    const suppliedHorizontalChrome = typeof suppliedChrome === "object"
+      ? Number(suppliedChrome?.horizontal) || 0
+      : Number(options.rendererChromeX) || 0;
+    if (measuredHorizontalChrome == null) {
+      measuredHorizontalChrome = measureHaloHorizontalChrome(root, currentWidth, {
+        horizontal: suppliedHorizontalChrome,
+      });
+    }
+    const horizontalChrome = measuredHorizontalChrome ?? 0;
+    const width = measuredHorizontalChrome == null ? currentWidth : Math.max(
+      currentWidth,
+      minimumWidth + horizontalChrome,
+    );
+    const contentHeight = contentMinimum();
+    const requiredHeight = haloMinimumNodeHeight(node, contentHeight,
+      suppliedChrome ?? options.rendererChrome);
+    const height = resizableContent ? Math.max(currentHeight, requiredHeight) : requiredHeight;
+    if (width === currentWidth && height === currentHeight) return;
+    const size = [width, height];
+    setHaloNodeSize(node, size);
+  };
+  const scheduleMinimum = () => {
+    if (destroyed) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resizeTimer = null; savedImages?.update(savedImages.storedOutput()); savedVideos?.update(savedVideos.storedOutput()); fields.forEach((field) => field.render()); minimumSize(); halo.renderStatic(); }, 0);
+  };
+  // Canonical callbacks own state; the DOM is refreshed only after they finish.
+  const refresh = () => {
+    if (destroyed) return;
+    fields.forEach((field) => field.render());
+    scheduleMinimum();
+  };
+  for (const state of snapshots) {
+    state.watchedCallback = function (...args) {
+      try { return state.callback?.apply(this, args); }
+      finally { refresh(); }
+    };
+    state.widget.callback = state.watchedCallback;
+  }
+  for (const name of ["onConnectionsChange", "onConfigure"]) {
+    const previous = node[name];
+    const wrapped = function (...args) {
+      try { return previous?.apply(this, args); }
+      finally {
+        if (name === "onConfigure") fields.forEach(field => field.reset?.());
+        savedImages?.update(savedImages.storedOutput()); savedVideos?.update(savedVideos.storedOutput()); refresh();
+      }
+    };
+    refreshHooks.push({ name, previous, wrapped });
+    node[name] = wrapped;
+  }
+  if (savedImages) {
+    const previous = node.onExecuted;
+    const wrapped = function (output, ...args) {
+      savedImages.prepareNative(output);
+      try { return previous?.call(this, output, ...args); }
+      finally { savedImages.update(savedImages.storedOutput() || output); refresh(); }
+    };
+    refreshHooks.push({ name: "onExecuted", previous, wrapped });
+    node.onExecuted = wrapped;
+    savedImages.update(savedImages.storedOutput());
+  }
+  if (savedVideos) {
+    const previous = node.onExecuted;
+    const wrapped = function (output, ...args) {
+      savedVideos.prepareNative(output);
+      try { return previous?.call(this, output, ...args); }
+      finally { savedVideos.update(savedVideos.storedOutput() || output); refresh(); }
+    };
+    refreshHooks.push({ name: "onExecuted", previous, wrapped });
+    node.onExecuted = wrapped;
+    savedVideos.update(savedVideos.storedOutput());
+  }
+  wrappedResize = function (...args) {
+    const result = previousResize?.apply(this, args);
+    scheduleMinimum();
+    return result;
+  };
+  node.onResize = wrappedResize;
+  const SizingObserver = doc.defaultView?.ResizeObserver || globalThis.ResizeObserver;
+  if (typeof SizingObserver === "function") {
+    sizingObserver = new SizingObserver(scheduleMinimum);
+    sizingObserver.observe(root);
+  }
+
+  const control = {
+    node,
+    host,
+    root,
+    contentRoot: root,
+    presentation,
+    halo,
+    canonicalWidgets,
+    render: () => fields.forEach((field) => field.render()),
+    destroy(fromNodeRemoval = false) {
+      if (destroyed) return;
+      destroyed = true;
+      if (!fromNodeRemoval) unregisterPresentation();
+      rollback();
+      if (node.onResize === wrappedResize) node.onResize = previousResize;
+      if (node.onRemoved === wrappedRemoved) node.onRemoved = previousRemoved;
+      if (node[EXECUTION_KEY] === control) delete node[EXECUTION_KEY];
+    },
+  };
+  node[EXECUTION_KEY] = control;
+  wrappedRemoved = function (...args) {
+    control.destroy(true);
+    try {
+      return (presentationRemoval || previousRemoved)?.apply(this, args);
+    } finally {
+      presentationCleanupPending = false;
+    }
+  };
+  node.onRemoved = wrappedRemoved;
+  scheduleMinimum();
+  return control;
+}
+
+export function mountHaloExecutionNode(node, options = {}) {
+  return mountHaloPrimitiveNode(node, options, EXECUTION_IDS, "execution");
+}
+
+export function mountHaloUtilityNode(node, options = {}) {
+  return mountHaloPrimitiveNode(node, options, UTILITY_IDS, "ui");
+}
+
+// Generated FACE FACTORY profiles pass their exact declaration IDs; unrelated nodes stay untouched.
+export function mountHaloParameterNode(node, nodeIds = [], options = {}) {
+  if (!Array.isArray(nodeIds) || !nodeIds.length ||
+      nodeIds.some(id => typeof id !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(id))) return null;
+  return mountHaloPrimitiveNode(node, options, new Set(nodeIds), "execution");
+}

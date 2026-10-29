@@ -1,0 +1,37 @@
+# Compatibility
+
+## Current status
+
+The `0.7.0.dev0` candidate requires ComfyUI 0.37.0 or newer and frontend
+1.53.6 or newer. PyAV must be supplied by the ComfyUI host for FACE FACTORY WAN 3.0; it is tested in CI but
+is not installed by this pack. FACE FACTORY WAN 3.0 has scoped Classic and Nodes 2.0
+evidence. That evidence does not extend Nodes 2.0 support to every other pack node.
+
+Version 0.4.0 passed package registration, schema, deterministic-build, registry, and
+frontend checks. The exact package also completed its bundled Krea 2 workflow on the
+recorded Classic/RTX 5090 boundary. This is a tested compatibility boundary rather
+than a universal hardware or workflow guarantee.
+
+| Area | Current boundary |
+| --- | --- |
+| Python | Package metadata requires Python 3.10 or newer. |
+| ComfyUI frontend | Classic frontend 1.49.6 was verified through workflow save, fresh-browser load, 20 unified node providers, and exact frontend/API graph equality. Nodes 2.0 is not supported or verified for this release. |
+| FACE FACTORY WAN 3.0 | Requires ComfyUI 0.37.0/frontend 1.53.6 and host PyAV. Preserves native IMAGE/AUDIO/VIDEO sockets and returns native VIDEO. WaveSpeed behavior, availability, prices, and output quality require separate live evaluation. |
+| FACE FACTORY SCAIL Window | Uses ComfyUI core SCAIL-2 support and returns an exact-N IMAGE batch from 81/5/76 decoded windows. Offline tests and install readback pass; renderer Classic / Nodes 2.0 live acceptance and GPU execution of this unified build are not tested. |
+| Torch/CUDA | Verified with ComfyUI 0.33.3, core `4da9e2dbead52fc1e68beae33fe3d7ad63b63241`, PyTorch 2.8.0+cu128, and an RTX 5090. No universal hardware, Torch, or CUDA matrix is claimed. |
+| Resolution nodes | Model-independent integer geometry; output dimensions do not certify that a model can generate or process that size. |
+| Image processing | Photo Finisher is local Torch processing. Easy Crop and Image Batch Loader operate on static uploaded images. |
+| Skin Mask | Needs separately acquired, licensed, and configured segmentation assets plus compatible runtimes. Installation does not complete this setup. An all-parts-off run can return an empty mask without inference. |
+| Eye Mask | Needs the registered eye detector and, when enabled, SAM refinement assets/runtime. Model weights are not bundled; installation does not complete this setup. |
+| Sampling/detail | Requires compatible ComfyUI MODEL, NOISE, CONDITIONING, LATENT, VAE, SAMPLER, or UPSCALE_MODEL inputs as documented per node. Sampler availability follows the host ComfyUI contract. |
+| Auto Prompter | Ordinary graph execution is local. Explicit Generate Prompt requires a supported xAI credential/model and may be paid. |
+| Workflow execution | The bundled Krea 2 graph completed 2K with Photo Finisher ON, 2K with it OFF, and 4K with it ON. Tests used a standard manual prompt without a LoRA. The optional Auto Prompter provider action was not run. |
+| Platforms | The verified environment is the recorded Linux GPU Pod. Other operating systems, cloud images, and portable builds require their own acceptance. |
+
+## External assets
+
+The distribution contains logical names and hashes for required runtime assets but no model weights. A matching filename alone is insufficient. Missing, unregistered, or hash-mismatched assets must fail rather than silently selecting another model. Follow [detector and segmentation setup](detector-setup.md) for exact paths, sources, hashes, runtime requirements, and the license evidence currently available for each asset.
+
+## Workflow compatibility
+
+Stable class IDs help existing workflows locate retained nodes; they do not guarantee that older widget or output positions remain compatible. Camera Look and Renoise are no longer registered; replace their chain with Photo Finisher and retune it. Read [migration.md](migration.md) for the finishing and resolution changes. Keep a rollback copy and validate duplicate workflows before production use.

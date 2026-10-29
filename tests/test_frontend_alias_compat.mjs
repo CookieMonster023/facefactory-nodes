@@ -1,0 +1,151 @@
+// Execute the production module graph and registration hooks. DOM sentinels stop
+// at the mounting boundary; visible renderer acceptance remains a separate test.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import crypto from "node:crypto";
+import {pathToFileURL} from "node:url";
+
+const root = path.resolve(process.argv[2]);
+const manifest = JSON.parse(fs.readFileSync(path.join(root, "MANIFEST.json")));
+const web = path.join(root, "web");
+const registrations = [];
+let domAttempts = 0;
+const sentinel = new Error("DOM mount boundary reached");
+const application = { registerExtension(extension) { registrations.push(extension); } };
+const context = vm.createContext({
+  console: {warn() {}, log() {}}, Symbol, Map, Set, URL,
+  document: { createElement() { domAttempts++; throw sentinel; } },
+  comfyAPI: { app: {app: application}, api: {api: {fetchApi() { throw new Error("No network in regression"); }}} },
+});
+const modules = new Map();
+const appModule = new vm.SyntheticModule(["app"], function () { this.setExport("app", application); }, {context});
+const apiModule = new vm.SyntheticModule(["api"], function () { this.setExport("api", context.comfyAPI.api.api); }, {context});
+async function moduleAt(filename) {
+  if (modules.has(filename)) return modules.get(filename);
+  let source = fs.readFileSync(filename, "utf8");
+  // Expose one private pure function without replacing its production body.
+  if (/[/\\]halo\.[a-f0-9]+\.mjs$/.test(filename)) source += "\nexport { parameterFieldPresentation };";
+  const module = new vm.SourceTextModule(source, {context, identifier: filename, initializeImportMeta(meta) {meta.url = pathToFileURL(filename).href;}});
+  modules.set(filename, module);
+  await module.link(async (specifier) => {
+    if (specifier.endsWith("/scripts/app.js")) return appModule;
+    if (specifier.endsWith("/scripts/api.js")) return apiModule;
+    assert(specifier.startsWith("./"), `Unexpected external dependency: ${specifier}`);
+    return moduleAt(path.resolve(path.dirname(filename), specifier));
+  });
+  return module;
+}
+function file(prefix) {
+  const names = fs.readdirSync(web).filter(name => name.startsWith(prefix + "."));
+  assert.equal(names.length, 1, `Exactly one ${prefix} module`);
+  return path.join(web, names[0]);
+}
+for (const relative of manifest.frontend_entrypoints) {
+  const module = await moduleAt(path.join(root, relative));
+  await module.evaluate();
+}
+const expectedRegistrations = manifest.frontend_entrypoints.length;
+assert.equal(registrations.length, expectedRegistrations);
+assert.equal(new Set(registrations.map(item => item.name)).size, expectedRegistrations);
+assert(registrations.some(item => item.name === "matrix.h3-resolution.halo.classic"));
+assert(registrations.some(item => item.name === "matrix.qwen-image-21-resolution.halo"));
+assert(registrations.some(item => item.name === "matrix.flux-3-klein-resolution.halo"));
+assert(registrations.some(item => item.name === "matrixlab.video-prompt"));
+const pairs = [
+  ["MATRIX_SpectralSampler", "MATRIXSpectralSampler", "halo.execution"],
+  ["MATRIX_AIInfluencerResolution2K4K", "MATRIXLAB_AIInfluencerResolution2K4K", "resolution"],
+  ["MATRIX_ImageBatchLoader", "MATRIXLAB_ImageBatchLoader", "image-collection.gallery"],
+  ["MATRIX_AutoPrompter", "MATRIXLAB_PromptDirector", "prompt-director.halo"],
+];
+const required = ["instructions", "system_prompt", "model", "final_prompt", "generation_state", "character_trigger", "collection", "aspect_ratio", "resolution_tier"];
+let hookCases = 0;
+for (const [current, legacy, needle] of pairs) {
+  const candidates = registrations.filter(item => item.name.includes(needle));
+  const extension = needle === "resolution" ? candidates.find(item => item.name.includes("2k4k")) : candidates[0];
+  assert(extension, `Registration for ${current}`);
+  for (const hook of ["nodeCreated", "loadedGraphNode"]) {
+    for (const key of ["comfyClass", "type"]) {
+      for (const id of [current, legacy, "UnrelatedNode"]) {
+        const node = { [key]: id, widgets: required.map(name => ({name, value: ""})), inputs: [], addDOMWidget() {} };
+        const before = JSON.stringify(node);
+        const started = domAttempts;
+        try { extension[hook](node); } catch (error) { assert.equal(error, sentinel); }
+        assert.equal(domAttempts - started, id === "UnrelatedNode" ? 0 : 1, `${id} ${hook} ${key}`);
+        assert.equal(JSON.stringify(node), before, "No canonical state mutation before mounting");
+        hookCases++;
+      }
+    }
+  }
+}
+const added = registrations.find(item => item.name === "matrixlab.video-prompt");
+for (const hook of ["nodeCreated", "loadedGraphNode"]) {
+  for (const key of ["comfyClass", "type"]) {
+    for (const id of ["MATRIX_Prompt", "MATRIX_VideoMetadataKiller", "UnrelatedNode"]) {
+      const node = {[key]: id, widgets: [{name: "prompt", value: ""}, {name: "filename_prefix", value: "clean"}], inputs: [], addDOMWidget() {}};
+      const started = domAttempts;
+      try { added[hook](node); } catch (error) { assert.equal(error, sentinel); }
+      assert.equal(domAttempts - started, id === "UnrelatedNode" ? 0 : 1, `${id} ${hook} ${key}`);
+      hookCases++;
+    }
+  }
+}
+const prompt = modules.get(file("prompt_director")).namespace;
+let loaderCases = 0;
+for (const key of ["comfyClass", "type"]) {
+  for (const id of ["MATRIX_ImageBatchLoader", "MATRIXLAB_ImageBatchLoader", "UnrelatedNode"]) {
+    const collection = {name: "collection", value: JSON.stringify({version: 1, items: [{image: "fixture.png [input]"}], selected: 0})};
+    const origin = {[key]: id, widgets: [collection], outputs: [{name: "images", type: "IMAGE"}]};
+    const node = {inputs: [{name: "images", link: 1}], graph: {links: {1: {origin_id: 2, origin_slot: 0}}, getNodeById() {return origin;}}};
+    if (id === "UnrelatedNode") assert.throws(() => prompt.resolveReferenceCollection(node), /Connect IMAGE directly/);
+    else {
+      const resolved = prompt.resolveReferenceCollection(node);
+      assert.equal(resolved.widget, collection);
+      assert.equal(resolved.collection.items[0].image, "fixture.png [input]");
+    }
+    loaderCases++;
+  }
+}
+const halo = modules.get(file("halo")).namespace;
+for (const scales of ["1", "0.5,1"]) {
+  const policy = id => halo.parameterFieldPresentation({type: id, inputs: [], widgets: [{name: "scales", value: scales}, {name: "mode", value: "manual"}]}, {name: "delta"});
+  assert.deepEqual(policy("MATRIXSpectralSampler"), policy("MATRIX_SpectralSampler"));
+  assert(policy("MATRIXSpectralSampler"));
+  assert.equal(policy("UnrelatedNode"), null);
+}
+const qwen = modules.get(file("qwen_image_21_resolution_control_deck")).namespace;
+const qwenTable = {
+  "1:1": [2048, 2048], "4:3": [2400, 1792], "3:4": [1792, 2400],
+  "3:2": [2528, 1696], "2:3": [1696, 2528], "16:9": [2752, 1536],
+  "9:16": [1536, 2752],
+};
+assert.equal(qwen.DEFAULT_STATE.aspect_ratio, "1:1");
+for (const [aspect_ratio, expected] of Object.entries(qwenTable)) {
+  assert.deepEqual(Array.from(qwen.calculateQwenImage21Resolution({aspect_ratio})), expected);
+}
+assert.equal(qwen.applyQwenImage21Action({aspect_ratio: "9:16"}, "reset").aspect_ratio, "1:1");
+assert.throws(() => qwen.calculateQwenImage21Resolution({aspect_ratio: "21:9"}), /aspect_ratio/);
+const flux = modules.get(file("flux_3_klein_resolution_control_deck")).namespace;
+const fluxTables = {
+  "1K": {"1:1": [1024, 1024], "4:3": [1184, 880], "3:4": [880, 1184], "3:2": [1248, 832], "2:3": [832, 1248], "16:9": [1360, 768], "9:16": [768, 1360]},
+  "1.5K": {"1:1": [1536, 1536], "4:3": [1776, 1328], "3:4": [1328, 1776], "3:2": [1888, 1248], "2:3": [1248, 1888], "16:9": [2048, 1152], "9:16": [1152, 2048]},
+  "2K": {"1:1": [2048, 2048], "4:3": [2352, 1776], "3:4": [1776, 2352], "3:2": [2496, 1680], "2:3": [1680, 2496], "16:9": [2720, 1536], "9:16": [1536, 2720]},
+  "4K": {"1:1": [4096, 4096], "4:3": [4096, 3088], "3:4": [3088, 4096], "3:2": [4096, 2752], "2:3": [2752, 4096], "16:9": [4096, 2320], "9:16": [2320, 4096]},
+};
+assert.deepEqual({...flux.DEFAULT_STATE}, {aspect_ratio: "1:1", resolution: "1K"});
+for (const [resolution, rows] of Object.entries(fluxTables)) {
+  for (const [aspect_ratio, expected] of Object.entries(rows)) {
+    assert.deepEqual(Array.from(flux.calculateFlux3KleinResolution({aspect_ratio, resolution})), expected);
+  }
+}
+assert.deepEqual({...flux.applyFlux3KleinAction({aspect_ratio: "9:16", resolution: "4K"}, "reset")}, {aspect_ratio: "1:1", resolution: "1K"});
+assert.throws(() => flux.calculateFlux3KleinResolution({aspect_ratio: "21:9", resolution: "1K"}), /aspect_ratio/);
+assert.throws(() => flux.calculateFlux3KleinResolution({aspect_ratio: "1:1", resolution: "8K"}), /resolution/);
+for (const [relative, expected] of Object.entries(manifest.frontend_alias_compatibility.frontend_assets)) {
+  const data = fs.readFileSync(path.join(root, relative));
+  assert.equal(crypto.createHash("sha256").update(data).digest("hex"), expected);
+  const match = relative.match(/\.([0-9a-f]{16})\.(?:js|mjs)$/);
+  if (match) assert.equal(expected.slice(0, 16), match[1]);
+}
+console.log(JSON.stringify({pass: true, hookCases, loaderCases, spectralPolicies: 2, registrations: registrations.length, scope: "Production routing, loader resolution, policy, import graph and content hashes; not visible browser acceptance"}, null, 2));
